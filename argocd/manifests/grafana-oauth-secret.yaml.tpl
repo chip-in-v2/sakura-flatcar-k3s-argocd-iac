@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-github-oauth
+  namespace: observability
+type: Opaque
+stringData:
+  client_id: "${gh_client_id_grafana}"
+  client_secret: "${gh_client_secret_grafana}"

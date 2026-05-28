@@ -1,0 +1,17 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfvars
+terraform/*.tfvars
+
+# SSH 鍵 (Terraform が生成)
+.ssh/
+
+# レンダリング済みマニフェスト (terraform apply が生成、機密情報を含む)
+rendered/
+
+# その他
+*.log
+.DS_Store

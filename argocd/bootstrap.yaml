@@ -1,0 +1,45 @@
+# ArgoCD Application - インフラ組み込みチャート群を管理する App of Apps
+# このファイルは ArgoCD インストール後に kubectl apply で適用する
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: infra
+  namespace: argocd
+spec:
+  description: インフラ層の組み込みチャート
+  sourceRepos:
+    - "https://helm.traefik.io/traefik"
+    - "https://cert-manager.io/charts"
+    - "https://cilium.github.io/tetragon"
+    - "https://helm.vector.dev"
+    - "https://greptimeteam.github.io/greptimedb-operator"
+    - "https://grafana.github.io/helm-charts"
+    - "https://rancher.github.io/helm-charts"
+    - "OCI_REGISTRY_PLACEHOLDER"
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.io
+spec:
+  project: infra
+  source:
+    repoURL: https://github.com/chip-in-v2/sakura-flatcar-k3s-argocd-iac
+    targetRevision: HEAD
+    path: argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
