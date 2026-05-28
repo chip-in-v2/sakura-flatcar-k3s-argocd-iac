@@ -9,19 +9,17 @@ metadata:
     app.kubernetes.io/name: argocd-cm
     app.kubernetes.io/part-of: argocd
 data:
-  # GitHub SSO
-  oidc.config: |
-    name: GitHub
-    issuer: https://token.actions.githubusercontent.com
-    clientID: ${gh_client_id_argocd}
-    clientSecret: $oidc.github.clientSecret
-    requestedScopes:
-      - openid
-      - profile
-      - email
-    requestedIDTokenClaims:
-      groups:
-        essential: true
+  # GitHub SSO via Dex
+  dex.config: |
+    connectors:
+      - type: github
+        id: github
+        name: GitHub
+        config:
+          clientID: ${gh_client_id_argocd}
+          clientSecret: $dex.github.clientSecret
+          orgs:
+            - name: ${gh_organization}
   url: "https://argocd.${domain}"
 ---
 apiVersion: v1

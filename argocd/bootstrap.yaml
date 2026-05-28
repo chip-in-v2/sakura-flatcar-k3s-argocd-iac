@@ -8,13 +8,7 @@ metadata:
 spec:
   description: インフラ層の組み込みチャート
   sourceRepos:
-    - "https://helm.traefik.io/traefik"
-    - "https://cert-manager.io/charts"
-    - "https://cilium.github.io/tetragon"
-    - "https://helm.vector.dev"
-    - "https://greptimeteam.github.io/greptimedb-operator"
-    - "https://grafana.github.io/helm-charts"
-    - "https://rancher.github.io/helm-charts"
+    - "https://github.com/chip-in-v2/sakura-flatcar-k3s-argocd-iac"
     - "OCI_REGISTRY_PLACEHOLDER"
   destinations:
     - namespace: "*"

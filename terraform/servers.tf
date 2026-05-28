@@ -59,16 +59,17 @@ resource "sakuracloud_server" "nodes" {
   description = "k3s control-plane + worker node"
   tags        = [var.sakura_label_prefix, "k3s", each.key]
 
-  cpu                = var.sakura_server_cpu
+  core               = var.sakura_server_cpu
   memory             = var.sakura_server_memory
   commitment         = var.sakura_server_commitment
   cpu_model          = var.sakura_server_cpu_model != "uncategorized" ? var.sakura_server_cpu_model : null
 
   disks = [sakuracloud_disk.nodes[each.key].id]
 
-  # NIC 0: パブリック
+  # NIC 0: パブリック (パケットフィルタでHTTP/HTTPSのみ許可)
   network_interface {
-    upstream = "shared"
+    upstream         = "shared"
+    packet_filter_id = sakuracloud_packet_filter.public.id
   }
 
   # NIC 1: 内部ネットワーク

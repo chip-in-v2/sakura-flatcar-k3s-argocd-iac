@@ -23,8 +23,6 @@ storage:
 
           [Network]
           Address=${internal_ip}/24
-          Gateway=
-          DNS=
 
     # ---------------------------------------------------------------
     # k3s インストールスクリプト
@@ -49,6 +47,7 @@ storage:
               --advertise-address "${internal_ip}" \
               --node-ip "${internal_ip}" \
               --flannel-iface eth1 \
+              --service-node-port-range 80-32767 \
               --disable traefik \
               --disable servicelb \
               --write-kubeconfig-mode 0644
@@ -61,6 +60,7 @@ storage:
               --advertise-address "${internal_ip}" \
               --node-ip "${internal_ip}" \
               --flannel-iface eth1 \
+              --service-node-port-range 80-32767 \
               --disable traefik \
               --disable servicelb \
               --write-kubeconfig-mode 0644
@@ -82,6 +82,9 @@ storage:
             echo "Waiting for k3s cluster..."
             sleep 5
           done
+
+          # Helm CLI インストール
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
           # ArgoCD namespace と インストール
           kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -

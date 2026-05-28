@@ -150,20 +150,21 @@ Tetragonのログを稼働監視で収集できるように Chart の ConfigMap 
 
 3. **GitHub OAuth アプリケーションの作成**
    - GitHub の `Settings` > `Developer settings` > `OAuth Apps` に移動します。
-   - `New OAuth App` を作成します。
+   - ArgoCD 用の `New OAuth App` を作成します。
      - Homepage URL: `https://argocd.${DOMAIN}` (例: `https://argocd.example.com`)
-     - Authorization callback URL: `https://argocd.${DOMAIN}/api/v2/users/oauth2/github/callback`
-   - 生成された **Client ID** と **Client Secret** を控えます。
-   - `New OAuth App` を作成します。
+     - Authorization callback URL: `https://argocd.${DOMAIN}/api/dex/callback`
+   - 生成された **Client ID** を `GH_CLIENT_ID_ARGOCD`、**Client Secret** を `GH_CLIENT_SECRET_ARGOCD` として控えます。
+   - Grafana 用の `New OAuth App` を作成します。
      - Homepage URL: `https://grafana.${DOMAIN}` (例: `https://grafana.example.com`)
-     - Authorization callback URL: `https://grafana.${DOMAIN}/api/v2/users/oauth2/github/callback`
-   - 生成された **Client ID** と **Client Secret** を控えます。
+     - Authorization callback URL: `https://grafana.${DOMAIN}/login/github`
+   - 生成された **Client ID** を `GH_CLIENT_ID_GRAFANA`、**Client Secret** を `GH_CLIENT_SECRET_GRAFANA` として控えます。
 
 ### 2. GitHub Codespaces の起動と環境変数設定
 
 1. 対象のリポジトリ（本リポジトリ）の Settings ページから `Secrets and variables` > `Codespaces` を開き、以下の環境変数 (Secrets) を登録します。
 
-   - `SAKURA_API_KEY`: Vultr API キー (必須)
+   - `SAKURA_ACCESS_TOKEN`: さくらのクラウド API キーのアクセストークン (必須)
+   - `SAKURA_ACCESS_TOKEN_SECRET`: さくらのクラウド API キーのアクセストークンのシークレット (必須)
    - `DO_PAT`: DigitalOcean API トークン (必須)
    - `DOMAIN`: 委譲したドメイン名 (必須。例: `example.com`)
    - `GH_CLIENT_ID_ARGOCD`: GitHub OAuth アプリの Client ID (必須)

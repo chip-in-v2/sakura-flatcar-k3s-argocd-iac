@@ -20,8 +20,8 @@ BUTANE_VERSION="v0.21.0"
 ARCH=$(uname -m)
 BUTANE_URL="https://github.com/coreos/butane/releases/download/${BUTANE_VERSION}/butane-${ARCH}-unknown-linux-gnu"
 echo "==> butane ${BUTANE_VERSION} をインストール中..."
-curl -sfL "${BUTANE_URL}" -o /usr/local/bin/butane
-chmod +x /usr/local/bin/butane
+sudo curl -sfL "${BUTANE_URL}" -o /usr/local/bin/butane
+sudo chmod +x /usr/local/bin/butane
 butane --version
 
 # ---------------------------------------------------------------

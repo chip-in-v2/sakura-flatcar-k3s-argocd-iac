@@ -1,19 +1,6 @@
 # ---------------------------------------------------------------
 # さくらのクラウド ロードバランサ (L4)
 # ---------------------------------------------------------------
-resource "sakuracloud_load_balancer" "lb" {
-  name        = "${var.sakura_label_prefix}-lb"
-  description = "HTTP/HTTPS L4 ロードバランサ"
-  plan        = "standard"
-
-  network_interface {
-    switch_id    = sakuracloud_internet.lb_router.switch_id
-    vrid         = 1
-    ip_addresses = [cidrhost(sakuracloud_internet.lb_router.ip_network, 4)]
-    nw_mask_len  = sakuracloud_internet.lb_router.nw_mask_len
-    gateway      = sakuracloud_internet.lb_router.gateway
-  }
-}
 
 # ルータ + スイッチ (LB 用グローバルIP)
 resource "sakuracloud_internet" "lb_router" {
@@ -23,43 +10,63 @@ resource "sakuracloud_internet" "lb_router" {
   description = "LB 用 グローバル IP ルータ"
 }
 
-# HTTPS VIP
-resource "sakuracloud_load_balancer_vip" "https" {
-  load_balancer_id = sakuracloud_load_balancer.lb.id
-  port             = 443
-  delay_loop       = 10
-  sorry_server     = cidrhost("192.168.100.0/24", 1) # sv1 をソーリーサーバに
+locals {
+  lb_cidr      = "${sakuracloud_internet.lb_router.network_address}/${sakuracloud_internet.lb_router.netmask}"
+  lb_mgmt_ip   = cidrhost(local.lb_cidr, 2)  # LB 管理 IP
+  lb_vip_ip    = cidrhost(local.lb_cidr, 4)  # VIP (DNS が指すパブリック IP)
+  sorry_server = cidrhost("192.168.100.0/24", 1) # sv1 をソーリーサーバに
 }
 
-# HTTP VIP (HTTPS にリダイレクトさせる Ingress Controller 側で実施)
-resource "sakuracloud_load_balancer_vip" "http" {
-  load_balancer_id = sakuracloud_load_balancer.lb.id
-  port             = 80
-  delay_loop       = 10
-  sorry_server     = cidrhost("192.168.100.0/24", 1)
-}
+resource "sakuracloud_load_balancer" "lb" {
+  name        = "${var.sakura_label_prefix}-lb"
+  description = "HTTP/HTTPS L4 ロードバランサ"
+  plan        = "standard"
 
-# ノードを実サーバとして LB に登録
-resource "sakuracloud_load_balancer_server" "https_nodes" {
-  for_each = toset(local.node_names)
+  network_interface {
+    switch_id    = sakuracloud_internet.lb_router.switch_id
+    vrid         = 1
+    ip_addresses = [local.lb_mgmt_ip]
+    netmask      = sakuracloud_internet.lb_router.netmask
+    gateway      = sakuracloud_internet.lb_router.gateway
+  }
 
-  load_balancer_vip_id = sakuracloud_load_balancer_vip.https.id
-  ip_address           = sakuracloud_server.nodes[each.key].network_interface[1].ip_address
-  port                 = 443
-  enabled              = true
-  health_check_path    = "/healthz"
-  health_check_status  = 200
-}
+  # HTTPS VIP
+  vip {
+    vip          = local.lb_vip_ip
+    port         = 443
+    delay_loop   = 10
+    sorry_server = local.sorry_server
 
-resource "sakuracloud_load_balancer_server" "http_nodes" {
-  for_each = toset(local.node_names)
+    dynamic "server" {
+      for_each = local.node_names
+      content {
+        ip_address = sakuracloud_server.nodes[server.value].network_interface[1].ip_address
+        protocol   = "https"
+        path       = "/"
+        status     = "200"
+        enabled    = true
+      }
+    }
+  }
 
-  load_balancer_vip_id = sakuracloud_load_balancer_vip.http.id
-  ip_address           = sakuracloud_server.nodes[each.key].network_interface[1].ip_address
-  port                 = 80
-  enabled              = true
-  health_check_path    = "/healthz"
-  health_check_status  = 200
+  # HTTP VIP (HTTPS へのリダイレクトは Ingress Controller 側で実施)
+  vip {
+    vip          = local.lb_vip_ip
+    port         = 80
+    delay_loop   = 10
+    sorry_server = local.sorry_server
+
+    dynamic "server" {
+      for_each = local.node_names
+      content {
+        ip_address = sakuracloud_server.nodes[server.value].network_interface[1].ip_address
+        protocol   = "http"
+        path       = "/"
+        status     = "200"
+        enabled    = true
+      }
+    }
+  }
 }
 
 # ---------------------------------------------------------------
@@ -69,12 +76,12 @@ data "digitalocean_domain" "main" {
   name = var.domain
 }
 
-# ワイルドカード A レコード -> LB グローバル IP
+# ワイルドカード A レコード -> LB VIP グローバル IP
 resource "digitalocean_record" "wildcard" {
   domain = data.digitalocean_domain.main.id
   type   = "A"
   name   = "*"
-  value  = cidrhost(sakuracloud_internet.lb_router.ip_network, 4)
+  value  = local.lb_vip_ip
   ttl    = 300
 }
 
@@ -83,7 +90,7 @@ resource "digitalocean_record" "apex" {
   domain = data.digitalocean_domain.main.id
   type   = "A"
   name   = "@"
-  value  = cidrhost(sakuracloud_internet.lb_router.ip_network, 4)
+  value  = local.lb_vip_ip
   ttl    = 300
 }
 
@@ -92,23 +99,21 @@ resource "digitalocean_record" "apex" {
 # ---------------------------------------------------------------
 resource "sakuracloud_container_registry" "main" {
   name            = "${replace(var.sakura_label_prefix, "-", "")}registry"
-  access_level    = "readwrite"
+  access_level    = "none"
   subdomain_label = "${replace(var.sakura_label_prefix, "-", "")}reg"
   description     = "インフラ組み込み Helm チャート用コンテナレジストリ"
-}
 
-resource "sakuracloud_container_registry_user" "k3s" {
-  container_registry_id = sakuracloud_container_registry.main.id
-  username              = "k3s-pull"
-  password              = random_password.registry_pull_password.result
-  permission            = "ro"
-}
+  user {
+    name       = "k3s-pull"
+    password   = random_password.registry_pull_password.result
+    permission = "readonly"
+  }
 
-resource "sakuracloud_container_registry_user" "ci" {
-  container_registry_id = sakuracloud_container_registry.main.id
-  username              = "ci-push"
-  password              = random_password.registry_push_password.result
-  permission            = "readwrite"
+  user {
+    name       = "ci-push"
+    password   = random_password.registry_push_password.result
+    permission = "readwrite"
+  }
 }
 
 resource "random_password" "registry_pull_password" {

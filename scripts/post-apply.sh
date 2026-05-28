@@ -41,12 +41,8 @@ echo "    OK: すべてのレンダリング済みファイルを確認しまし
 # ---------------------------------------------------------------
 echo "==> [2/5] terraform output から sv1 の IP を取得中..."
 cd "${TF_DIR}"
-LABEL_PREFIX=$(terraform output -raw -state=terraform.tfstate 2>/dev/null \
-  || terraform output -raw sakura_label_prefix 2>/dev/null \
-  || echo "${SAKURA_LABEL_PREFIX:-ops-frontier}")
-SV1_NAME="${LABEL_PREFIX}-sv1"
 SV1_IP=$(terraform output -json node_public_ips | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); print(d['${SV1_NAME}'])")
+  "import sys,json; d=json.load(sys.stdin); sv1_key=[k for k in d.keys() if k.endswith('-sv1')][0]; print(d[sv1_key])")
 echo "    sv1: ${SV1_IP}"
 
 # ---------------------------------------------------------------

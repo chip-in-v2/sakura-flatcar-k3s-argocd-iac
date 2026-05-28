@@ -18,9 +18,9 @@ spec:
           type: NodePort
         ports:
           web:
-            nodePort: 80
+            nodePort: 30080
           websecure:
-            nodePort: 443
+            nodePort: 30443
         additionalArguments:
           - "--serversTransport.insecureSkipVerify=true"
           - "--entryPoints.websecure.http.tls=true"

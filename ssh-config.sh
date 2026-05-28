@@ -98,8 +98,8 @@ data = json.load(sys.stdin)
 exprs = data['PacketFilter']['Expression']
 # 既存の SSH ルールは削除してから追加 (冪等性)
 exprs = [e for e in exprs if not (e.get('DestinationPort') == '22')]
-# default deny の前に SSH ルールを挿入
-deny_index = next((i for i, e in enumerate(exprs) if not e.get('Action', '') and e.get('Protocol') == 'ip'), len(exprs))
+# default deny の前に SSH ルールを挿入 (deny action は 'deny' または empty/missing Action)
+deny_index = next((i for i, e in enumerate(exprs) if e.get('Action') in ('deny', '') and e.get('Protocol') == 'ip'), len(exprs))
 ssh_rule = {
   'Protocol': 'tcp',
   'SourceNetwork': '${MY_IP}/32',

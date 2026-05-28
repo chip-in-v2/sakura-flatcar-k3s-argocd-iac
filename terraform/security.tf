@@ -27,18 +27,18 @@ resource "sakuracloud_packet_filter" "public" {
 
   # HTTPS
   expression {
-    protocol    = "tcp"
-    dest_port   = "443"
-    allow       = true
-    description = "HTTPS"
+    protocol            = "tcp"
+    destination_port    = "443"
+    allow               = true
+    description         = "HTTPS"
   }
 
   # HTTP
   expression {
-    protocol    = "tcp"
-    dest_port   = "80"
-    allow       = true
-    description = "HTTP"
+    protocol            = "tcp"
+    destination_port    = "80"
+    allow               = true
+    description         = "HTTP"
   }
 
   # k3s API (内部ロードバランサからのみ使用するが、HealthCheck用に一時的に許可)
@@ -52,11 +52,5 @@ resource "sakuracloud_packet_filter" "public" {
   }
 }
 
-# パブリックNICにパケットフィルタを適用
-resource "sakuracloud_packet_filter_connections" "nodes" {
-  for_each = toset(local.node_names)
-
-  server_id    = sakuracloud_server.nodes[each.key].id
-  interface_id = sakuracloud_server.nodes[each.key].network_interface[0].id
-  packet_filter_id = sakuracloud_packet_filter.public.id
-}
+# パブリックNICにパケットフィルタを適用 (各サーバの network_interface[0] に packet_filter_id を設定)
+# → servers.tf の sakuracloud_server.nodes 内 NIC 0 ブロックで参照する

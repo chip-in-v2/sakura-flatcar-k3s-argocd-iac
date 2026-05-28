@@ -15,8 +15,8 @@ output "node_private_ips" {
 }
 
 output "lb_global_ip" {
-  description = "ロードバランサのグローバル IP"
-  value       = cidrhost(sakuracloud_internet.lb_router.ip_network, 4)
+  description = "ロードバランサのグローバル IP (VIP)"
+  value       = local.lb_vip_ip
 }
 
 output "container_registry_fqdn" {
@@ -26,7 +26,7 @@ output "container_registry_fqdn" {
 
 output "container_registry_pull_user" {
   description = "コンテナレジストリ Pull 用ユーザ名"
-  value       = sakuracloud_container_registry_user.k3s.username
+  value       = "k3s-pull"
 }
 
 output "container_registry_pull_password" {
@@ -37,7 +37,7 @@ output "container_registry_pull_password" {
 
 output "container_registry_push_user" {
   description = "コンテナレジストリ Push 用ユーザ名"
-  value       = sakuracloud_container_registry_user.ci.username
+  value       = "ci-push"
 }
 
 output "container_registry_push_password" {
