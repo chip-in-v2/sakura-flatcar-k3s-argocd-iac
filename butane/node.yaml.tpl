@@ -12,6 +12,22 @@ storage:
         inline: "${hostname}"
 
     # ---------------------------------------------------------------
+    # パブリック NIC の静的 IP 設定 (LB ルータネットワーク / eth0)
+    # ---------------------------------------------------------------
+    - path: /etc/systemd/network/05-public.network
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          Name=eth0
+
+          [Network]
+          Address=${lb_ip}/${lb_netmask}
+          Gateway=${lb_gateway}
+          DNS=8.8.8.8
+          DNS=8.8.4.4
+
+    # ---------------------------------------------------------------
     # 内部 NIC の静的 IP 設定 (systemd-networkd)
     # ---------------------------------------------------------------
     - path: /etc/systemd/network/10-internal.network

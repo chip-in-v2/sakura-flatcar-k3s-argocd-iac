@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INPUT=$(cat)
-CONTENT=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['content'])")
+CONTENT=$(echo "$INPUT" | jq -r '.content')
 
 if ! command -v butane &>/dev/null; then
   # butane が未インストールの場合は自動インストール
@@ -20,4 +20,4 @@ fi
 
 JSON=$(echo "$CONTENT" | butane --pretty --strict 2>&1)
 
-python3 -c "import sys,json; print(json.dumps({'json': sys.stdin.read()}))" <<< "$JSON"
+jq -n --arg json "$JSON" '{"json": $json}'

@@ -2,7 +2,7 @@ output "node_public_ips" {
   description = "各ノードのパブリック IP アドレス"
   value = {
     for name in local.node_names :
-    name => sakuracloud_server.nodes[name].network_interface[0].ip_address
+    name => try(sakuracloud_server.nodes[name].ip_address, null)
   }
 }
 
@@ -10,7 +10,7 @@ output "node_private_ips" {
   description = "各ノードの内部 IP アドレス"
   value = {
     for name in local.node_names :
-    name => sakuracloud_server.nodes[name].network_interface[1].ip_address
+    name => try(sakuracloud_server.nodes[name].network_interface[1].user_ip_address, null)
   }
 }
 

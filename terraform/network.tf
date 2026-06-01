@@ -14,7 +14,6 @@ locals {
   lb_cidr      = "${sakuracloud_internet.lb_router.network_address}/${sakuracloud_internet.lb_router.netmask}"
   lb_mgmt_ip   = cidrhost(local.lb_cidr, 2)  # LB 管理 IP
   lb_vip_ip    = cidrhost(local.lb_cidr, 4)  # VIP (DNS が指すパブリック IP)
-  sorry_server = cidrhost("192.168.100.0/24", 1) # sv1 をソーリーサーバに
 }
 
 resource "sakuracloud_load_balancer" "lb" {
@@ -32,15 +31,14 @@ resource "sakuracloud_load_balancer" "lb" {
 
   # HTTPS VIP
   vip {
-    vip          = local.lb_vip_ip
-    port         = 443
-    delay_loop   = 10
-    sorry_server = local.sorry_server
+    vip        = local.lb_vip_ip
+    port       = 443
+    delay_loop = 10
 
     dynamic "server" {
       for_each = local.node_names
       content {
-        ip_address = sakuracloud_server.nodes[server.value].network_interface[1].ip_address
+        ip_address = sakuracloud_server.nodes[server.value].network_interface[0].user_ip_address
         protocol   = "https"
         path       = "/"
         status     = "200"
@@ -51,15 +49,14 @@ resource "sakuracloud_load_balancer" "lb" {
 
   # HTTP VIP (HTTPS へのリダイレクトは Ingress Controller 側で実施)
   vip {
-    vip          = local.lb_vip_ip
-    port         = 80
-    delay_loop   = 10
-    sorry_server = local.sorry_server
+    vip        = local.lb_vip_ip
+    port       = 80
+    delay_loop = 10
 
     dynamic "server" {
       for_each = local.node_names
       content {
-        ip_address = sakuracloud_server.nodes[server.value].network_interface[1].ip_address
+        ip_address = sakuracloud_server.nodes[server.value].network_interface[0].user_ip_address
         protocol   = "http"
         path       = "/"
         status     = "200"
