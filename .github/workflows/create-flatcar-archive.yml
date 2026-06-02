@@ -62,8 +62,8 @@ jobs:
           # 20GB のスパース RAW ディスクイメージを作成
           truncate -s 20480M flatcar.img
 
-          # ループデバイスとして設定
-          LOOP=$(sudo losetup --find --show flatcar.img)
+          # ループデバイスとして設定（パーティションスキャン付き）
+          LOOP=$(sudo losetup --find --show --partscan flatcar.img)
           echo "Loop device: ${LOOP}"
 
           # Flatcar をインストール (stable チャネル / OpenStack OEM)
@@ -72,15 +72,20 @@ jobs:
           else
             sudo ./flatcar-install -d "${LOOP}" -C stable -V "${VERSION}"
           fi
+
+          # パーティションテーブルを再読み込み
+          sudo partprobe "${LOOP}" || true
+          sudo udevadm settle || true
+
           # 第6パーティション（OEM）をマウント
           mkdir -p /tmp/oem
-          sudo mount /dev/loop3p6 /tmp/oem
+          sudo mount "${LOOP}p6" /tmp/oem
 
           # grub.cfg のカーネルパラメータに "ignition.platform.id=nocloud" を追記
           # これにより、起動時にさくらのクラウドの cidata ドライブを探しに行きます
           echo 'set linux_append="ignition.platform.id=nocloud"' | sudo tee -a /tmp/oem/grub.cfg
           sudo umount /tmp/oem
-          
+
           # ループデバイスを解除
           sudo losetup -d "${LOOP}"
 
