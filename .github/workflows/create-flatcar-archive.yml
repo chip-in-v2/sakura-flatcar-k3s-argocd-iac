@@ -1,0 +1,166 @@
+name: Create Flatcar Archive on Sakura Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      flatcar_version:
+        description: 'Flatcar バージョン (例: 3975.2.2 または current)'
+        required: false
+        default: 'current'
+      sakura_region:
+        description: 'さくらのクラウドのゾーン'
+        required: false
+        default: 'is1c'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 既存アーカイブの確認
+        id: check
+        env:
+          SAKURA_ACCESS_TOKEN: ${{ secrets.SAKURA_ACCESS_TOKEN }}
+          SAKURA_ACCESS_TOKEN_SECRET: ${{ secrets.SAKURA_ACCESS_TOKEN_SECRET }}
+        run: |
+          ZONE="${{ inputs.sakura_region }}"
+          VERSION="${{ inputs.flatcar_version }}"
+          ARCHIVE_NAME="flatcar-openstack-${VERSION}"
+          API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
+
+          EXISTING=$(curl -sf -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+            "${API_BASE}/archive?Count=100" \
+            | jq -r --arg name "${ARCHIVE_NAME}" '.Archives[] | select(.Name == $name) | .ID' \
+            | head -1)
+
+          if [[ -n "${EXISTING}" ]]; then
+            echo "existing_id=${EXISTING}" >> "${GITHUB_OUTPUT}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 既存アーカイブがある場合はスキップ
+        if: steps.check.outputs.skip == 'true'
+        run: |
+          echo "::notice::アーカイブは既に存在します: ${{ steps.check.outputs.existing_id }}"
+          echo "SAKURA_ISO_IMAGE_ID=${{ steps.check.outputs.existing_id }}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Flatcar ディスクイメージを作成
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="${{ inputs.flatcar_version }}"
+
+          # flatcar-install に必要なパッケージを導入
+          sudo apt-get install -y --no-install-recommends gdisk
+
+          # flatcar-install スクリプトをダウンロード
+          curl -fsSLO https://raw.githubusercontent.com/flatcar/init/flatcar-master/bin/flatcar-install
+          chmod +x flatcar-install
+
+          # 20GB のスパース RAW ディスクイメージを作成
+          truncate -s 20480M flatcar.img
+
+          # ループデバイスとして設定
+          LOOP=$(sudo losetup --find --show flatcar.img)
+          echo "Loop device: ${LOOP}"
+
+          # Flatcar をインストール (stable チャネル / OpenStack OEM)
+          if [[ "${VERSION}" == "current" ]]; then
+            sudo ./flatcar-install -d "${LOOP}" -C stable
+          else
+            sudo ./flatcar-install -d "${LOOP}" -C stable -V "${VERSION}"
+          fi
+          # 第6パーティション（OEM）をマウント
+          mkdir -p /tmp/oem
+          sudo mount /dev/loop3p6 /tmp/oem
+
+          # grub.cfg のカーネルパラメータに "ignition.platform.id=nocloud" を追記
+          # これにより、起動時にさくらのクラウドの cidata ドライブを探しに行きます
+          echo 'set linux_append="ignition.platform.id=nocloud"' | sudo tee -a /tmp/oem/grub.cfg
+          sudo umount /tmp/oem
+          
+          # ループデバイスを解除
+          sudo losetup -d "${LOOP}"
+
+          ls -lh flatcar.img
+
+      - name: アーカイブエントリを作成
+        if: steps.check.outputs.skip != 'true'
+        id: create
+        env:
+          SAKURA_ACCESS_TOKEN: ${{ secrets.SAKURA_ACCESS_TOKEN }}
+          SAKURA_ACCESS_TOKEN_SECRET: ${{ secrets.SAKURA_ACCESS_TOKEN_SECRET }}
+        run: |
+          ZONE="${{ inputs.sakura_region }}"
+          VERSION="${{ inputs.flatcar_version }}"
+          ARCHIVE_NAME="flatcar-openstack-${VERSION}"
+          API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
+
+          CREATE_RESP=$(curl -sf -X POST \
+            -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg name "${ARCHIVE_NAME}" \
+              '{Archive:{Name:$name,SizeMB:20480,Description:"Flatcar Container Linux (OpenStack OEM) - uploaded by GitHub Actions"}}')" \
+            "${API_BASE}/archive")
+
+          ARCHIVE_ID=$(echo "${CREATE_RESP}" | jq -r '.Archive.ID')
+          FTP_HOST=$(echo "${CREATE_RESP}" | jq -r '.FTPServer.HostName')
+          FTP_USER=$(echo "${CREATE_RESP}" | jq -r '.FTPServer.User')
+          FTP_PASS=$(echo "${CREATE_RESP}" | jq -r '.FTPServer.Password')
+
+          echo "archive_id=${ARCHIVE_ID}" >> "${GITHUB_OUTPUT}"
+          echo "ftp_host=${FTP_HOST}" >> "${GITHUB_OUTPUT}"
+          echo "ftp_user=${FTP_USER}" >> "${GITHUB_OUTPUT}"
+          # パスワードはマスクして出力
+          echo "::add-mask::${FTP_PASS}"
+          echo "ftp_pass=${FTP_PASS}" >> "${GITHUB_OUTPUT}"
+          echo "アーカイブ ID: ${ARCHIVE_ID}"
+
+      - name: FTP アップロード
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          curl --progress-bar \
+            --ftp-pasv \
+            --max-time 3600 \
+            -T flatcar.img \
+            --user "${{ steps.create.outputs.ftp_user }}:${{ steps.create.outputs.ftp_pass }}" \
+            "ftp://${{ steps.create.outputs.ftp_host }}/archive.img"
+
+      - name: FTP セッションを閉じてアーカイブを確定
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SAKURA_ACCESS_TOKEN: ${{ secrets.SAKURA_ACCESS_TOKEN }}
+          SAKURA_ACCESS_TOKEN_SECRET: ${{ secrets.SAKURA_ACCESS_TOKEN_SECRET }}
+        run: |
+          ZONE="${{ inputs.sakura_region }}"
+          ARCHIVE_ID="${{ steps.create.outputs.archive_id }}"
+          API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
+
+          curl -sf -X DELETE \
+            -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+            "${API_BASE}/archive/${ARCHIVE_ID}/ftp" >/dev/null
+
+          echo "アーカイブの準備完了を待機中..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+              "${API_BASE}/archive/${ARCHIVE_ID}" \
+              | jq -r '.Archive.Availability')
+            if [[ "${STATUS}" == "available" ]]; then
+              echo "アーカイブが利用可能になりました。"
+              break
+            fi
+            echo "待機中... (${i}/30) status=${STATUS}"
+            sleep 10
+          done
+
+          echo "## Flatcar アーカイブ登録完了" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| 項目 | 値 |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|------|-----|" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| アーカイブ ID | \`${ARCHIVE_ID}\` |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| ゾーン | ${ZONE} |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Codespaces シークレット \`SAKURA_ISO_IMAGE_ID\` に \`${ARCHIVE_ID}\` を設定してください。" >> "${GITHUB_STEP_SUMMARY}"

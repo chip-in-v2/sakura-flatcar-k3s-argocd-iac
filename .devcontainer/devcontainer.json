@@ -1,0 +1,25 @@
+{
+  "name": "Flacker IaC (Terraform + Nomad)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest",
+      "tflint": "latest",
+      "terragrunt": "latest"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    }
+  },
+  "waitFor": "postCreateCommand",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "hashicorp.terraform",
+        "hashicorp.hcl",
+        "yzhang.markdown-all-in-one"
+      ]
+    }
+  }
+}
