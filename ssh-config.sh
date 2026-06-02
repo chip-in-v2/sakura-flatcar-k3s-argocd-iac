@@ -73,50 +73,36 @@ CURRENT_FILTER=$(get_packet_filter)
 
 if $REMOVE; then
   echo "==> SSH 許可ルールを削除中..."
-  NEW_EXPRESSIONS=$(echo "${CURRENT_FILTER}" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-exprs = data['PacketFilter']['Expression']
-exprs = [e for e in exprs if not (e.get('DestinationPort') == '22' and e.get('SourceNetwork', '').endswith('/32'))]
-print(json.dumps(exprs))
-")
-  PAYLOAD=$(echo "${CURRENT_FILTER}" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-data['PacketFilter']['Expression'] = json.loads(open('/dev/stdin').read())
-print(json.dumps({'PacketFilter': data['PacketFilter']}))
-" <<< "${NEW_EXPRESSIONS}")
+  PAYLOAD=$(echo "${CURRENT_FILTER}" | jq '
+    (.PacketFilter.Expression) |= map(select(
+      (.DestinationPort != "22" or (.SourceNetwork == null or .SourceNetwork == "")) and
+      .SourcePort != "22"
+    )) |
+    {PacketFilter: .PacketFilter}
+  ')
   update_packet_filter "${PAYLOAD}"
   echo "==> SSH 許可ルールを削除しました。"
   exit 0
 fi
 
-echo "==> パケットフィルタに SSH 許可ルールを追加中 (${MY_IP}/32 -> 22/tcp)..."
-NEW_EXPRESSIONS=$(echo "${CURRENT_FILTER}" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-exprs = data['PacketFilter']['Expression']
-# 既存の SSH ルールは削除してから追加 (冪等性)
-exprs = [e for e in exprs if not (e.get('DestinationPort') == '22')]
-# default deny の前に SSH ルールを挿入 (deny action は 'deny' または empty/missing Action)
-deny_index = next((i for i, e in enumerate(exprs) if e.get('Action') in ('deny', '') and e.get('Protocol') == 'ip'), len(exprs))
-ssh_rule = {
-  'Protocol': 'tcp',
-  'SourceNetwork': '${MY_IP}/32',
-  'DestinationPort': '22',
-  'Action': 'allow',
-  'Description': 'SSH from dev env (managed by ssh-config.sh)'
-}
-exprs.insert(deny_index, ssh_rule)
-print(json.dumps(exprs))
-")
-PAYLOAD=$(python3 -c "
-import json, sys
-current = json.loads(open('/dev/stdin').read())
-exprs = json.loads('''${NEW_EXPRESSIONS}''')
-current['PacketFilter']['Expression'] = exprs
-print(json.dumps({'PacketFilter': current['PacketFilter']}))
-" <<< "${CURRENT_FILTER}")
+echo "==> パケットフィルタに SSH 許可ルールを追加中 (${MY_IP}/32 <-> 22/tcp)..."
+SSH_INBOUND_RULE=$(jq -n \
+  --arg src "${MY_IP}" \
+  '{Protocol:"tcp",SourceNetwork:$src,DestinationPort:"22",Action:"allow",Description:"SSH inbound from dev env (managed by ssh-config.sh)"}')
+SSH_OUTBOUND_RULE=$(jq -n \
+  '{Protocol:"tcp",SourcePort:"22",Action:"allow",Description:"SSH outbound response (managed by ssh-config.sh)"}')
+PAYLOAD=$(echo "${CURRENT_FILTER}" | jq \
+  --argjson inbound "${SSH_INBOUND_RULE}" \
+  --argjson outbound "${SSH_OUTBOUND_RULE}" '
+  .PacketFilter.Expression |= map(select(
+    (.DestinationPort != "22" or (.SourceNetwork == null or .SourceNetwork == "")) and
+    .SourcePort != "22"
+  )) |
+  (.PacketFilter.Expression) as $exprs |
+  (($exprs | to_entries | map(select(.value.Action == "deny" or .value.Action == "" or (.value.Action == null and .value.Protocol == "ip"))) | first | .key) // ($exprs | length)) as $idx |
+  .PacketFilter.Expression = ($exprs[:$idx] + [$inbound, $outbound] + $exprs[$idx:]) |
+  {PacketFilter: .PacketFilter}
+')
 update_packet_filter "${PAYLOAD}" >/dev/null
 echo "==> パケットフィルタを更新しました。"
 
@@ -147,7 +133,7 @@ EOF
 
 for i in 1 2 3; do
   NODE_NAME="${LABEL_PREFIX}-sv${i}"
-  NODE_IP=$(echo "${NODE_PUBLIC_IPS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['${NODE_NAME}'])" 2>/dev/null || echo "")
+  NODE_IP=$(echo "${NODE_PUBLIC_IPS}" | jq -r --arg name "${NODE_NAME}" '.[$name] // empty' 2>/dev/null || echo "")
   if [[ -z "${NODE_IP}" ]]; then
     continue
   fi
@@ -182,7 +168,7 @@ echo "  ssh ${LABEL_PREFIX}-sv3"
 if $SETUP_KUBECONFIG; then
   echo "==> kubeconfig を ${LABEL_PREFIX}-sv1 から取得中..."
   mkdir -p "${HOME}/.kube"
-  SV1_IP=$(echo "${NODE_PUBLIC_IPS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['${LABEL_PREFIX}-sv1'])")
+  SV1_IP=$(echo "${NODE_PUBLIC_IPS}" | jq -r --arg name "${LABEL_PREFIX}-sv1" '.[$name]')
   ssh -i "${PRIVATE_KEY_DEST}" -o StrictHostKeyChecking=no \
     "core@${SV1_IP}" "sudo cat /etc/rancher/k3s/k3s.yaml" \
     | sed "s/127.0.0.1/${SV1_IP}/g" \

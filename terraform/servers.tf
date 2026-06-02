@@ -14,7 +14,7 @@ locals {
       server_is_init = i == 0  # sv1 が init サーバ
       init_ip        = cidrhost("192.168.100.0/24", 1)
       internal_ip    = cidrhost("192.168.100.0/24", i + 1)
-      lb_ip          = cidrhost(local.lb_cidr, i + 5)
+      lb_ip          = cidrhost(local.lb_cidr, i + 6)
       lb_netmask     = sakuracloud_internet.lb_router.netmask
       lb_gateway     = sakuracloud_internet.lb_router.gateway
       ssh_public_key = tls_private_key.ssh_key.public_key_openssh
@@ -40,7 +40,7 @@ resource "sakuracloud_switch" "internal" {
 }
 
 # ---------------------------------------------------------------
-# ディスク (各ノード用 - OS はISO起動 + Ignition でプロビジョン)
+# ディスク (各ノード用 - Flatcar Linux アーカイブから作成)
 # ---------------------------------------------------------------
 resource "sakuracloud_disk" "nodes" {
   for_each = toset(local.node_names)
@@ -50,6 +50,7 @@ resource "sakuracloud_disk" "nodes" {
   size              = 40
   connector         = "virtio"
   description       = "Flatcar OS disk for ${each.key}"
+  source_archive_id = var.sakura_flatcar_archive_id
 }
 
 # ---------------------------------------------------------------
@@ -73,7 +74,7 @@ resource "sakuracloud_server" "nodes" {
   network_interface {
     upstream         = sakuracloud_internet.lb_router.switch_id
     packet_filter_id = sakuracloud_packet_filter.public.id
-    user_ip_address  = cidrhost(local.lb_cidr, index(local.node_names, each.key) + 5)
+    user_ip_address  = cidrhost(local.lb_cidr, index(local.node_names, each.key) + 6)
   }
 
   # NIC 1: 内部ネットワーク
@@ -82,16 +83,12 @@ resource "sakuracloud_server" "nodes" {
     user_ip_address = cidrhost("192.168.100.0/24", index(local.node_names, each.key) + 1)
   }
 
-  # ISO イメージから起動 (Flatcar Linux)
-  cdrom_id = var.sakura_iso_image_id
-
   # Ignition 設定を UserData として渡す
   user_data = chomp(data.external.ignition[each.key].result["json"])
 
   lifecycle {
-    # cdrom_id は初回起動後に手動でデタッチするため変更を無視
     # user_data (Ignition) は初回起動時のみ使用されるため変更を無視
-    ignore_changes = [cdrom_id, user_data]
+    ignore_changes = [user_data]
   }
 }
 

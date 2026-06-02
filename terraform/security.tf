@@ -44,6 +44,29 @@ resource "sakuracloud_packet_filter" "public" {
   # k3s API (内部ロードバランサからのみ使用するが、HealthCheck用に一時的に許可)
   # SSH は ssh-config.sh で動的に追加するため、デフォルトは閉じる
 
+  # IP フラグメントを許可 (大きなパケットの断片化対応)
+  expression {
+    protocol    = "fragment"
+    allow       = true
+    description = "IP fragment allow"
+  }
+
+  # アウトバウンド HTTPS (レスポンス)
+  expression {
+    protocol    = "tcp"
+    source_port = "443"
+    allow       = true
+    description = "outbound HTTPS"
+  }
+
+  # アウトバウンド HTTP (レスポンス)
+  expression {
+    protocol    = "tcp"
+    source_port = "80"
+    allow       = true
+    description = "outbound HTTP"
+  }
+
   # その他すべて拒否
   expression {
     protocol    = "ip"

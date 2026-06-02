@@ -41,8 +41,7 @@ echo "    OK: すべてのレンダリング済みファイルを確認しまし
 # ---------------------------------------------------------------
 echo "==> [2/5] terraform output から sv1 の IP を取得中..."
 cd "${TF_DIR}"
-SV1_IP=$(terraform output -json node_public_ips | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); sv1_key=[k for k in d.keys() if k.endswith('-sv1')][0]; print(d[sv1_key])")
+SV1_IP=$(terraform output -json node_public_ips | jq -r 'to_entries | map(select(.key | endswith("-sv1"))) | first | .value')
 echo "    sv1: ${SV1_IP}"
 
 # ---------------------------------------------------------------
