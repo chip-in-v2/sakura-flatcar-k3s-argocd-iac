@@ -127,12 +127,11 @@ jobs:
       - name: FTP アップロード
         if: steps.check.outputs.skip != 'true'
         run: |
-          curl --progress-bar \
+          curl --ssl \
             --ftp-pasv \
-            --max-time 3600 \
-            -T flatcar.img \
+            --upload-file flatcar.img \
             --user "${{ steps.create.outputs.ftp_user }}:${{ steps.create.outputs.ftp_pass }}" \
-            "ftp://${{ steps.create.outputs.ftp_host }}/archive.img"
+            "ftp://${{ steps.create.outputs.ftp_host }}/"
 
       - name: FTP セッションを閉じてアーカイブを確定
         if: steps.check.outputs.skip != 'true'
