@@ -129,8 +129,10 @@ jobs:
         run: |
           curl --ssl \
             --ftp-pasv \
+            --no-progress-meter \
             --upload-file flatcar.img \
             --user "${{ steps.create.outputs.ftp_user }}:${{ steps.create.outputs.ftp_pass }}" \
+            -w "アップロード完了: %{size_upload} bytes / 速度: %{speed_upload} bytes/s / 時間: %{time_total}s\n" \
             "ftp://${{ steps.create.outputs.ftp_host }}/"
 
       - name: FTP セッションを閉じてアーカイブを確定
