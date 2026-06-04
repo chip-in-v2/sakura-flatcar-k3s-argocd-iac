@@ -84,6 +84,8 @@ jobs:
           # grub.cfg のカーネルパラメータに "ignition.platform.id=proxmoxve" を追記
           # さくらのクラウドは cicloud というラベルがつけられたファイルシステムに user-data という YAML ファイルを置く
           echo 'set linux_append="ignition.platform.id=proxmoxve"' | sudo tee -a /tmp/oem/grub.cfg
+          sudo cat /tmp/oem/grub.cfg
+          sudo sync
           sudo umount /tmp/oem
 
           # ループデバイスを解除
@@ -100,7 +102,7 @@ jobs:
         run: |
           ZONE="${{ inputs.sakura_region }}"
           VERSION="${{ inputs.flatcar_version }}"
-          ARCHIVE_NAME="flatcar-proxmoxvee-${VERSION}"
+          ARCHIVE_NAME="flatcar-proxmoxve-${VERSION}"
           API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
 
           CREATE_RESP=$(curl -sf -X POST \
