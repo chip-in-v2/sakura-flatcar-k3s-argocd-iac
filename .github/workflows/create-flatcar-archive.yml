@@ -26,7 +26,7 @@ jobs:
         run: |
           ZONE="${{ inputs.sakura_region }}"
           VERSION="${{ inputs.flatcar_version }}"
-          ARCHIVE_NAME="flatcar-openstack-${VERSION}"
+          ARCHIVE_NAME="flatcar-proxmoxve-${VERSION}"
           API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
 
           EXISTING=$(curl -sf -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
@@ -66,7 +66,7 @@ jobs:
           LOOP=$(sudo losetup --find --show --partscan flatcar.img)
           echo "Loop device: ${LOOP}"
 
-          # Flatcar をインストール (stable チャネル / OpenStack OEM)
+          # Flatcar をインストール (stable チャネル / cloudinit)
           if [[ "${VERSION}" == "current" ]]; then
             sudo ./flatcar-install -d "${LOOP}" -C stable
           else
@@ -81,9 +81,9 @@ jobs:
           mkdir -p /tmp/oem
           sudo mount "${LOOP}p6" /tmp/oem
 
-          # grub.cfg のカーネルパラメータに "ignition.platform.id=nocloud" を追記
-          # これにより、起動時にさくらのクラウドの cidata ドライブを探しに行きます
-          echo 'set linux_append="ignition.platform.id=nocloud"' | sudo tee -a /tmp/oem/grub.cfg
+          # grub.cfg のカーネルパラメータに "ignition.platform.id=proxmoxve" を追記
+          # さくらのクラウドは cicloud というラベルがつけられたファイルシステムに user-data という YAML ファイルを置く
+          echo 'set linux_append="ignition.platform.id=proxmoxve"' | sudo tee -a /tmp/oem/grub.cfg
           sudo umount /tmp/oem
 
           # ループデバイスを解除
@@ -100,7 +100,7 @@ jobs:
         run: |
           ZONE="${{ inputs.sakura_region }}"
           VERSION="${{ inputs.flatcar_version }}"
-          ARCHIVE_NAME="flatcar-openstack-${VERSION}"
+          ARCHIVE_NAME="flatcar-proxmoxvee-${VERSION}"
           API_BASE="https://secure.sakura.ad.jp/cloud/zone/${ZONE}/api/cloud/1.1"
 
           CREATE_RESP=$(curl -sf -X POST \
@@ -108,7 +108,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$(jq -n \
               --arg name "${ARCHIVE_NAME}" \
-              '{Archive:{Name:$name,SizeMB:20480,Description:"Flatcar Container Linux (OpenStack OEM) - uploaded by GitHub Actions"}}')" \
+              '{Archive:{Name:$name,SizeMB:20480,Description:"Flatcar Container Linux (proxmoxve OEM) - uploaded by GitHub Actions"}}')" \
             "${API_BASE}/archive")
 
           ARCHIVE_ID=$(echo "${CREATE_RESP}" | jq -r '.Archive.ID')
@@ -127,7 +127,7 @@ jobs:
       - name: FTP アップロード
         if: steps.check.outputs.skip != 'true'
         run: |
-          curl --ssl \
+          curl --ssl-reqd \
             --ftp-pasv \
             --no-progress-meter \
             --upload-file flatcar.img \

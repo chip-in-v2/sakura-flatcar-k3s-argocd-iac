@@ -19,7 +19,7 @@
 packer {
   required_plugins {
     sakuracloud = {
-      version = "~> 1.0"
+      version = "v0.12.0"
       source  = "github.com/sacloud/sakuracloud"
     }
   }

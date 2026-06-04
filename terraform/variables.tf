@@ -69,7 +69,7 @@ variable "sakura_flatcar_archive_id" {
 variable "sakura_registry_subdomain_label" {
   description = "コンテナレジストリのサブドメインラベル (グローバル一意の必要があります)"
   type        = string
-  default     = "ops-frontier-registry-20260602-2"
+  default     = "ops-frontier-registry-20260603"
 }
 
 # ---------------------------------------------------------------
