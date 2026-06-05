@@ -56,3 +56,23 @@ output "packet_filter_id" {
   description = "パブリック NIC 用パケットフィルタ ID (ssh-config.sh で SSH 許可ルール追加に使用)"
   value       = sakuracloud_packet_filter.public.id
 }
+
+output "ssh_public_key_openssh" {
+  description = "Terraform が生成した SSH 公開鍵 (OpenSSH 形式)"
+  value       = tls_private_key.ssh_key.public_key_openssh
+}
+
+output "lb_gateway" {
+  description = "LB ルータのデフォルトゲートウェイ IP"
+  value       = sakuracloud_internet.lb_router.gateway
+}
+
+output "lb_netmask" {
+  description = "LB ルータのプレフィックス長"
+  value       = sakuracloud_internet.lb_router.netmask
+}
+
+output "domain" {
+  description = "DigitalOcean DNS に委譲されたドメイン"
+  value       = var.domain
+}

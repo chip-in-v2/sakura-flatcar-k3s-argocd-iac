@@ -17,7 +17,8 @@
 
 ## 構築ツール
 
-IaC のツールとしては、Terraform と Ignition(Butane) を使用する。Codespace でこのリポジトリを開き、 terraform コマンド1回でサービスの公開までできるようにする。
+IaC のツールとしては、Terraform と Ignition(Butane) を使用する。Codespace でこのリポジトリを開き、`setup.py` で構築する。
+
 
 ### 事前準備
 
@@ -40,7 +41,6 @@ IaC のツールとしては、Terraform と Ignition(Butane) を使用する。
 |SAKURA_SERVER_CPU_MODEL|さくらのクラウドのサーバのCPUモデル|amd_epyc_7713p|uncategorized|
 |DOMAIN|DigitalOcean DNS に委譲されるドメイン|v2v.chip-in.net|必須|
 |LE_ENVIRONMENT|Let's Encrypt の環境 (production または staging)|staging|production|
-|SAKURA_ISO_IMAGE_ID|さくらのクラウドにアップロードした Flatcar Linux のISOイメージのID|12357923|必須|
 |GH_ORGANIZATION|Github の組織のID |ops-frontier|chip-in-v2|
 |GH_CLIENT_ID_GRAFANA|Github ClientID Grafana用||必須|
 |GH_CLIENT_SECRET_GRAFANA|Github Secret Grafana用||必須|
@@ -51,22 +51,28 @@ IaC のツールとしては、Terraform と Ignition(Butane) を使用する。
 
 ### サーバとネットワーク
 
-terraform で SAKURA_ISO_IMAGE_ID で登録された Flatcar Linux の ISO イメージでサーバを3台を SAKURA_REGION で指定されたリージョンに構築する。
-セキュリティ向上のため、さくらのクラウドの Firewall Group を構成し、サーバのパブリックIPには**ポート 80 (HTTP) と 443 (HTTPS) のみ**オープンにするようにアクセス制限をかける。SSH接続はデフォルトでは許可されない。
+terraform でサーバを3台を SAKURA_REGION で指定されたリージョンに構築する。各サーバには以下の2枚のディスクを接続する。
+
+- **ブートストラップディスク (20GB)**: Ubuntu 22.04 LTS パブリックアーカイブから作成。ディスク修正 API でグローバル IP と SSH 公開鍵を設定して起動する。Flatcar のインストール作業環境として使用する。
+- **ターゲットディスク (40GB)**: 未フォーマットの SSD。`flatcar-install` で Flatcar Container Linux をインストールする先。
+
+さくらのクラウドの API でディスクの順序を入れ替えることで、Ubuntu と Flatcar のどちらから起動するかを選択できる。これにより、サーバを再構築せずに Ignition 設定をデバッグできる。
+
+セキュリティ向上のため、さくらのクラウドのパケットフィルタを構成し、サーバのパブリックIPには**ポート 80 (HTTP) と 443 (HTTPS) のみ**オープンにするようにアクセス制限をかける。SSH接続はデフォルトでは許可されない。
 
 ### ssh
 
-ssh のペア鍵は terraform でオンデマンドに生成する。。 ssh-config.sh で ssh で開発環境のターミナルから接続できるようになる。このシェルスクリプトは以下の動作を行う。
+ssh のペア鍵は terraform でオンデマンドに生成する。`setup.py build-infra` が以下を自動的に行う。
 
 1. 開発環境からインターネットに接続するときのグローバルIPを調べる
-2. ファイアウォールで 22 番ポートの tcp 接続を許可する
-3. tfstate を調べて、秘密鍵, config, known_hosts のファイルを ~/.ssh ディレクトリに生成する
+2. パケットフィルタで 22 番ポートの tcp 接続を開発環境の IP のみ許可する
+3. `~/.ssh/config` を生成し、サーバ名でアクセスできるようにする
 
-config では `${SAKURA_LABEL_PREFIX}-sv1`,  `${SAKURA_LABEL_PREFIX}-sv2`,  `${SAKURA_LABEL_PREFIX}-sv3` のホスト名でアクセスできるようにする。
+config では `${SAKURA_LABEL_PREFIX}-sv1`, `${SAKURA_LABEL_PREFIX}-sv2`, `${SAKURA_LABEL_PREFIX}-sv3` のホスト名でアクセスできるようにする。
 
 ### 初期インストール
 
-初期インストールは Flatcar container Linux でデフォルトでサポートされている igniton を使用する。ignition の内容については Butane を使用して [YAML](./butane/node.yaml) で記述する。
+初期インストールは Flatcar Container Linux でデフォルトでサポートされている Ignition を使用する。Ignition の内容については Butane を使用して [YAML](./butane/node.yaml.tpl) で記述する。`setup.py boot` がテンプレートから各サーバ用の Ignition ファイルを生成し、Ubuntu 上で `flatcar-install` を実行してターゲットディスクにインストールする。インストール完了後、ディスク順序を入れ替えて Flatcar から起動する。
 
 ### ミドルウェア
 
@@ -177,22 +183,50 @@ Tetragonのログを稼働監視で収集できるように Chart の ConfigMap 
    - `.devcontainer/devcontainer.json` に基づいて自動的に Terraform や k3s がインストールされた環境が立ち上がります。
    - 上記で設定した環境変数は、すべて `TF_VAR_` プレフィックスが付与されて Terraform 用の変数として自動認識されます。
 
-### 3. Codespace 起動後
+### 3. Terraform 初期化
 ```bash
-cd terraform
-terraform init
-terraform apply
+cd terraform && terraform init && cd ..
 ```
 
-### 4. SSH アクセス
+### 4. インフラ構築
+
+Ubuntu サーバのプロビジョニング、SSH パケットフィルタの設定、`flatcar-install` のインストールを行う。
+
 ```bash
-bash ssh-config.sh
-ssh ops-frontier-sv1
+./setup.py build-infra
 ```
 
-### 5. クラスタ起動後 
-k3s インストールに数分かかるので、その後に以下を実行する。
+### 5. Flatcar Linux のインストールと起動
+
+各サーバに Ignition ファイルを生成して Flatcar をインストールし、再起動する。k3s と ArgoCD は起動後に自動インストールされる。
+
 ```bash
-bash scripts/post-apply.sh
+./setup.py boot
+```
+
+### 6. クラスタの確認
+
+インストールには数分かかる。
+
+```bash
+ssh -i .ssh/id_ed25519 core@<sv1のIP>
+sudo journalctl -u install-k3s.service -f     # k3s インストールログ
+sudo journalctl -u install-argocd.service -f  # ArgoCD インストールログ (sv1 のみ)
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl get nodes
+```
+
+### 7. SSH アクセスの無効化（オプション）
+
+作業完了後、SSH のパケットフィルタルールを削除してセキュリティを強化する。
+
+```bash
+./setup.py deny-ssh
+```
+
+### インフラの削除
+
+```bash
+./setup.py destroy
 ```
 

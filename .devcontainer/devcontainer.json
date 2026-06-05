@@ -1,5 +1,5 @@
 {
-  "name": "Flacker IaC (Terraform + Nomad)",
+  "name": "Flatcar IaC (Terraform + k3s)",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "features": {
     "ghcr.io/devcontainers/features/terraform:1": {
@@ -9,6 +9,9 @@
     },
     "ghcr.io/devcontainers/features/github-cli:1": {
       "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
     }
   },
   "waitFor": "postCreateCommand",

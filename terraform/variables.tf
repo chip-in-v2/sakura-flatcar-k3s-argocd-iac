@@ -61,15 +61,16 @@ variable "sakura_server_cpu_model" {
   default     = "uncategorized"
 }
 
-variable "sakura_flatcar_archive_id" {
-  description = "さくらのクラウドにアップロードした Flatcar Linux のアーカイブID"
+variable "sakura_iso_image_id" {
+  description = "さくらのクラウドにアップロードした Flatcar Linux インストーラ ISO の ID (廃止: Ubuntu アーカイブブートに移行済み)"
   type        = string
+  default     = null
 }
 
 variable "sakura_registry_subdomain_label" {
   description = "コンテナレジストリのサブドメインラベル (グローバル一意の必要があります)"
   type        = string
-  default     = "ops-frontier-registry-20260603"
+  default     = "ops-frontier-registry-20260605-6"
 }
 
 # ---------------------------------------------------------------

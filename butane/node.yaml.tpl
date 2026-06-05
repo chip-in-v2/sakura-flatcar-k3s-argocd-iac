@@ -56,6 +56,7 @@ storage:
           curl -sfL https://get.k3s.io | \
           %{ if server_is_init ~}
             INSTALL_K3S_VERSION="$K3S_VERSION" \
+            INSTALL_K3S_SKIP_SELINUX_RPM=true \
             K3S_TOKEN="${cluster_token}" \
             sh -s - server \
               --cluster-init \
@@ -69,6 +70,7 @@ storage:
               --write-kubeconfig-mode 0644
           %{ else ~}
             INSTALL_K3S_VERSION="$K3S_VERSION" \
+            INSTALL_K3S_SKIP_SELINUX_RPM=true \
             K3S_TOKEN="${cluster_token}" \
             K3S_URL="https://${init_ip}:6443" \
             sh -s - server \
@@ -93,24 +95,27 @@ storage:
           #!/bin/bash
           set -euo pipefail
 
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          export PATH=$PATH:/opt/bin
+
           # k3s が Ready になるまで待機
-          until kubectl get nodes 2>/dev/null | grep -q " Ready"; do
+          until k3s kubectl get nodes 2>/dev/null | grep -q " Ready"; do
             echo "Waiting for k3s cluster..."
             sleep 5
           done
 
           # Helm CLI インストール
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=/opt/bin USE_SUDO=false bash
 
           # ArgoCD namespace と インストール
-          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          k3s kubectl create namespace argocd --dry-run=client -o yaml | k3s kubectl apply -f -
+          k3s kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
           # cert-manager インストール
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+          k3s kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 
           # Traefik (Ingress Controller) インストール
-          kubectl create namespace traefik --dry-run=client -o yaml | kubectl apply -f -
+          k3s kubectl create namespace traefik --dry-run=client -o yaml | k3s kubectl apply -f -
           helm repo add traefik https://helm.traefik.io/traefik
           helm upgrade --install traefik traefik/traefik \
             --namespace traefik \

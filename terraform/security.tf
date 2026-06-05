@@ -18,6 +18,12 @@ resource "local_file" "ssh_public_key" {
   file_permission = "0644"
 }
 
+# さくらのクラウドに SSH 公開鍵を登録 (ディスク修正で使用)
+resource "sakuracloud_ssh_key" "main" {
+  name       = "${var.sakura_label_prefix}-ssh-key"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+}
+
 # ---------------------------------------------------------------
 # Firewall Group
 # ---------------------------------------------------------------
@@ -42,7 +48,7 @@ resource "sakuracloud_packet_filter" "public" {
   }
 
   # k3s API (内部ロードバランサからのみ使用するが、HealthCheck用に一時的に許可)
-  # SSH は ssh-config.sh で動的に追加するため、デフォルトは閉じる
+  # SSH は build.py で動的に追加するため、デフォルトは閉じる
 
   # IP フラグメントを許可 (大きなパケットの断片化対応)
   expression {
@@ -65,6 +71,61 @@ resource "sakuracloud_packet_filter" "public" {
     source_port = "80"
     allow       = true
     description = "outbound HTTP"
+  }
+
+  # DNS TCP inbound
+  expression {
+    protocol         = "tcp"
+    destination_port = "53"
+    allow            = true
+    description      = "DNS TCP inbound"
+  }
+
+  # DNS TCP outbound (レスポンス)
+  expression {
+    protocol    = "tcp"
+    source_port = "53"
+    allow       = true
+    description = "DNS TCP outbound"
+  }
+
+  # DNS UDP inbound
+  expression {
+    protocol         = "udp"
+    destination_port = "53"
+    allow            = true
+    description      = "DNS UDP inbound"
+  }
+
+  # DNS UDP outbound (レスポンス)
+  expression {
+    protocol    = "udp"
+    source_port = "53"
+    allow       = true
+    description = "DNS UDP outbound"
+  }
+
+  # NTP UDP inbound
+  expression {
+    protocol         = "udp"
+    destination_port = "123"
+    allow            = true
+    description      = "NTP inbound"
+  }
+
+  # NTP UDP outbound (レスポンス)
+  expression {
+    protocol    = "udp"
+    source_port = "123"
+    allow       = true
+    description = "NTP outbound"
+  }
+
+  # ICMP 双方向
+  expression {
+    protocol    = "icmp"
+    allow       = true
+    description = "ICMP"
   }
 
   # その他すべて拒否
