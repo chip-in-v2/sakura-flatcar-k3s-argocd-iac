@@ -9,7 +9,13 @@ spec:
   description: インフラ層の組み込みチャート
   sourceRepos:
     - "https://github.com/chip-in-v2/sakura-flatcar-k3s-argocd-iac"
-    - "OCI_REGISTRY_PLACEHOLDER"
+    - "https://charts.jetstack.io"
+    - "https://grafana.github.io/helm-charts"
+    - "https://greptimeteam.github.io/greptimedb-operator"
+    - "https://helm.cilium.io"
+    - "https://helm.traefik.io/traefik"
+    - "https://helm.vector.dev"
+    - "https://rancher.github.io/helm-charts"
   destinations:
     - namespace: "*"
       server: https://kubernetes.default.svc

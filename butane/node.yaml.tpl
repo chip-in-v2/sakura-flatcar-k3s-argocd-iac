@@ -41,6 +41,20 @@ storage:
           Address=${internal_ip}/24
 
     # ---------------------------------------------------------------
+    # DSR 用 VIP をループバックに付与
+    # lo は ARP を送出しないため LB の ARP オーナーシップと競合しない
+    # ---------------------------------------------------------------
+    - path: /etc/systemd/network/20-lo-vip.network
+      mode: 0644
+      contents:
+        inline: |
+          [Match]
+          Name=lo
+
+          [Address]
+          Address=${lb_vip_ip}/32
+
+    # ---------------------------------------------------------------
     # k3s インストールスクリプト
     # ---------------------------------------------------------------
     - path: /opt/bin/install-k3s.sh
@@ -104,25 +118,18 @@ storage:
             sleep 5
           done
 
-          # Helm CLI インストール
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | HELM_INSTALL_DIR=/opt/bin USE_SUDO=false bash
-
           # ArgoCD namespace と インストール
           k3s kubectl create namespace argocd --dry-run=client -o yaml | k3s kubectl apply -f -
           k3s kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-          # cert-manager インストール
-          k3s kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+          # ArgoCD が Ready になるまで待機
+          echo "Waiting for ArgoCD to be ready..."
+          k3s kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
 
-          # Traefik (Ingress Controller) インストール
-          k3s kubectl create namespace traefik --dry-run=client -o yaml | k3s kubectl apply -f -
-          helm repo add traefik https://helm.traefik.io/traefik
-          helm upgrade --install traefik traefik/traefik \
-            --namespace traefik \
-            --set service.type=NodePort \
-            --set ports.web.nodePort=80 \
-            --set ports.websecure.nodePort=443 \
-            --wait
+          # ArgoCD App of Apps ブートストラップ
+          # bootstrap.yaml と infra-apps.yaml は terraform apply 後に
+          # ローカルから kubectl apply -f rendered/ で適用してください。
+          echo "ArgoCD installed. Apply rendered/bootstrap.yaml and rendered/infra-apps.yaml from your local machine."
 
 %{ endif ~}
 

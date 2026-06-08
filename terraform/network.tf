@@ -59,7 +59,7 @@ resource "sakuracloud_load_balancer" "lb" {
         ip_address = sakuracloud_server.nodes[server.value].network_interface[0].user_ip_address
         protocol   = "http"
         path       = "/"
-        status     = "200"
+        status     = "301"
         enabled    = true
       }
     }

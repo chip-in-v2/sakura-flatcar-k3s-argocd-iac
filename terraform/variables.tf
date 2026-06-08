@@ -70,7 +70,7 @@ variable "sakura_iso_image_id" {
 variable "sakura_registry_subdomain_label" {
   description = "コンテナレジストリのサブドメインラベル (グローバル一意の必要があります)"
   type        = string
-  default     = "ops-frontier-registry-20260605-6"
+  default     = "ops-frontier-registry-20260606"
 }
 
 # ---------------------------------------------------------------

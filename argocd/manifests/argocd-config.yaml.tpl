@@ -45,6 +45,24 @@ data:
     g, ${gh_organization}:developer, role:readonly
   policy.default: role:''
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  server.insecure: "true"
+---
+# Traefik のデフォルト TLS ストア (traefik namespace の wildcard-tls を使用)
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: traefik
+spec:
+  defaultCertificate:
+    secretName: wildcard-tls
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -52,7 +70,6 @@ metadata:
   namespace: argocd
   annotations:
     traefik.ingress.kubernetes.io/router.tls: "true"
-    traefik.ingress.kubernetes.io/router.tls.options: "default"
 spec:
   ingressClassName: traefik
   tls:

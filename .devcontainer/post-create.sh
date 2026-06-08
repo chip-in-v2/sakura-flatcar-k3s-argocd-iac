@@ -25,11 +25,20 @@ sudo chmod +x /usr/local/bin/butane
 butane --version
 
 # ---------------------------------------------------------------
+# kubectl インストール
+# ---------------------------------------------------------------
+KUBECTL_VERSION=$(curl -sfL https://dl.k8s.io/release/stable.txt)
+KUBECTL_ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+echo "==> kubectl ${KUBECTL_VERSION} をインストール中..."
+sudo curl -sfL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl" \
+  -o /usr/local/bin/kubectl
+sudo chmod +x /usr/local/bin/kubectl
+kubectl version --client
+
+# ---------------------------------------------------------------
 # スクリプトに実行権限を付与
 # ---------------------------------------------------------------
-chmod +x /workspaces/sakura-flatcar-k3s-argocd-iac/scripts/butane-render.sh
-chmod +x /workspaces/sakura-flatcar-k3s-argocd-iac/scripts/post-apply.sh
-chmod +x /workspaces/sakura-flatcar-k3s-argocd-iac/ssh-config.sh
+chmod +x /workspaces/sakura-flatcar-k3s-argocd-iac/setup.py
 
 # ---------------------------------------------------------------
 # .ssh ディレクトリを作成 (Terraform が秘密鍵を書き込む先)

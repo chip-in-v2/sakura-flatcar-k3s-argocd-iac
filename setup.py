@@ -3,10 +3,11 @@
 SETUP.md に従い、Flatcar Container Linux + k3s クラスタを構築するスクリプト。
 
 使用方法:
-  ./setup.py build-infra  ネットワークとサーバを terraform で構築します
-  ./setup.py boot         Flatcar Linux をインストールして起動します
-  ./setup.py deny-ssh     パケットフィルタで ssh のアクセスを禁止します
-  ./setup.py destroy      ネットワークとサーバを terraform で削除します
+  ./setup.py build-infra      ネットワークとサーバを terraform で構築します
+  ./setup.py boot             Flatcar Linux をインストールして起動します
+  ./setup.py install-charts   YAML をレンダリングし ArgoCD ブートストラップを適用します
+  ./setup.py deny-ssh         パケットフィルタで ssh のアクセスを禁止します
+  ./setup.py destroy          ネットワークとサーバを terraform で削除します
 """
 
 import argparse
@@ -14,6 +15,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TERRAFORM_DIR = os.path.join(SCRIPT_DIR, "terraform")
 BUTANE_TPL = os.path.join(SCRIPT_DIR, "butane", "node.yaml.tpl")
 SSH_KEY_PATH = os.path.join(SCRIPT_DIR, ".ssh", "id_ed25519")
+RENDERED_DIR = os.path.join(SCRIPT_DIR, "rendered")
+ARGOCD_MANIFESTS_DIR = os.path.join(SCRIPT_DIR, "argocd", "manifests")
+ARGOCD_APPS_DIR = os.path.join(SCRIPT_DIR, "argocd", "apps")
+ARGOCD_BOOTSTRAP_YAML = os.path.join(SCRIPT_DIR, "argocd", "bootstrap.yaml")
+KUBECONFIG_PATH = os.path.expanduser("~/.kube/config")
 
 _SSH_CONFIG_BEGIN = "# BEGIN sakura-flatcar-k3s managed section"
 _SSH_CONFIG_END   = "# END sakura-flatcar-k3s managed section"
@@ -261,6 +268,13 @@ def _is_ssh_rule(expr: dict) -> bool:
     return proto == "tcp" and (dst_port == "22" or src_port == "22")
 
 
+def _is_tcp_port_rule(expr: dict, port: str) -> bool:
+    proto    = expr.get("Protocol", "")
+    dst_port = expr.get("DestinationPort", "")
+    src_port = expr.get("SourcePort", "")
+    return proto == "tcp" and (dst_port == port or src_port == port)
+
+
 def _add_ssh_packet_filter_rules(
     packet_filter_id: str,
     my_ip: str,
@@ -329,6 +343,80 @@ def _remove_ssh_packet_filter_rules(
     payload = {"PacketFilter": current["PacketFilter"]}
     _sakura_api_request("PUT", pf_url, token, secret, payload)
     print(f"==> パケットフィルタから SSH ルールを削除しました")
+
+
+def _add_tcp_packet_filter_rule(
+    packet_filter_id: str,
+    port: str,
+    my_ip: str,
+    api_base: str,
+    token: str,
+    secret: str,
+    label: str = "",
+) -> None:
+    """パケットフィルタに TCP ポートの許可ルールを追加する (冪等)。"""
+    pf_url = f"{api_base}/packetfilter/{packet_filter_id}"
+    desc = label or f"port {port}"
+
+    current = _sakura_api_request("GET", pf_url, token, secret)
+    expressions: list[dict] = current["PacketFilter"]["Expression"]
+
+    # 既存の同ポートルールを除去
+    expressions = [e for e in expressions if not _is_tcp_port_rule(e, port)]
+
+    inbound_rule = {
+        "Protocol": "tcp",
+        "SourceNetwork": my_ip,
+        "DestinationPort": port,
+        "Action": "allow",
+        "Description": f"{desc} inbound from dev env (managed by setup.py)",
+    }
+    outbound_rule = {
+        "Protocol": "tcp",
+        "SourcePort": port,
+        "Action": "allow",
+        "Description": f"{desc} outbound response (managed by setup.py)",
+    }
+
+    insert_idx = len(expressions)
+    for i, e in enumerate(expressions):
+        if e.get("Action") == "deny" or (
+            e.get("Protocol") == "ip" and not e.get("Action")
+        ):
+            insert_idx = i
+            break
+
+    expressions = expressions[:insert_idx] + [inbound_rule, outbound_rule] + expressions[insert_idx:]
+    current["PacketFilter"]["Expression"] = expressions
+    payload = {"PacketFilter": current["PacketFilter"]}
+    _sakura_api_request("PUT", pf_url, token, secret, payload)
+    print(f"==> パケットフィルタに {desc} 許可ルールを追加しました (送信元 IP: {my_ip})")
+
+
+def _remove_tcp_packet_filter_rule(
+    packet_filter_id: str,
+    port: str,
+    api_base: str,
+    token: str,
+    secret: str,
+    label: str = "",
+) -> None:
+    """パケットフィルタから TCP ポートのルールを削除する。"""
+    pf_url = f"{api_base}/packetfilter/{packet_filter_id}"
+    desc = label or f"port {port}"
+
+    current = _sakura_api_request("GET", pf_url, token, secret)
+    expressions: list[dict] = current["PacketFilter"]["Expression"]
+
+    filtered = [e for e in expressions if not _is_tcp_port_rule(e, port)]
+    if len(filtered) == len(expressions):
+        print(f"==> 削除対象の {desc} ルールが見つかりませんでした")
+        return
+
+    current["PacketFilter"]["Expression"] = filtered
+    payload = {"PacketFilter": current["PacketFilter"]}
+    _sakura_api_request("PUT", pf_url, token, secret, payload)
+    print(f"==> パケットフィルタから {desc} ルールを削除しました")
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +505,7 @@ def _setup_ssh_config(node_public_ips: dict[str, str]) -> None:
         lines.append(
             f"Host {node_name}\n"
             f"    HostName {ip}\n"
-            f"    User {UBUNTU_SSH_USER}\n"
+            f"    User {FLATCAR_SSH_USER}\n"
             f"    IdentityFile {SSH_KEY_PATH}\n"
             f"    StrictHostKeyChecking no\n"
             f"    UserKnownHostsFile /dev/null"
@@ -551,6 +639,7 @@ def _render_ignition(node_name: str, node_index: int, outputs: dict) -> str:
         "lb_ip":          lb_ip,
         "lb_netmask":     str(outputs["lb_netmask"]["value"]),
         "lb_gateway":     outputs["lb_gateway"]["value"],
+        "lb_vip_ip":      outputs["lb_global_ip"]["value"],
         "ssh_public_key": outputs["ssh_public_key_openssh"]["value"].strip(),
         "domain":         domain,
     }
@@ -674,9 +763,16 @@ def cmd_boot() -> None:
     outputs = _get_terraform_output()
     node_public_ips: dict[str, str] = outputs["node_public_ips"]["value"]
     node_names = sorted(node_public_ips.keys())
+    packet_filter_id: str = outputs["packet_filter_id"]["value"]
 
     token, secret, region = get_sakura_env()
     api_base = get_api_base(region)
+
+    # SSH パケットフィルタを現在のグローバル IP で更新 (Codespaces 再起動で IP が変わるため)
+    print("==> 開発環境のグローバル IP を取得中...")
+    my_ip = _get_my_global_ip()
+    print(f"==> グローバル IP: {my_ip}")
+    _add_ssh_packet_filter_rules(packet_filter_id, my_ip, api_base, token, secret)
 
     for i, node_name in enumerate(node_names):
         ip = node_public_ips[node_name]
@@ -757,6 +853,241 @@ def cmd_boot() -> None:
 
 
 # ---------------------------------------------------------------------------
+# テンプレート変数 (install-charts)
+# ---------------------------------------------------------------------------
+
+
+def _get_chart_vars() -> dict:
+    """チャートテンプレートのレンダリングに必要な変数を環境変数から取得する。"""
+
+    def _require(name: str) -> str:
+        v = os.environ.get(name) or os.environ.get(f"TF_VAR_{name.lower()}", "")
+        if not v:
+            raise EnvironmentError(f"環境変数 {name} が設定されていません。")
+        return v
+
+    def _optional(name: str, default: str) -> str:
+        return os.environ.get(name) or os.environ.get(f"TF_VAR_{name.lower()}", default)
+
+    return {
+        "domain":                   _require("DOMAIN"),
+        "do_pat":                   _require("DO_PAT"),
+        "le_environment":           _optional("LE_ENVIRONMENT", "production"),
+        "gh_organization":          _optional("GH_ORGANIZATION", "chip-in-v2"),
+        "gh_client_id_argocd":      _require("GH_CLIENT_ID_ARGOCD"),
+        "gh_client_secret_argocd":  _require("GH_CLIENT_SECRET_ARGOCD"),
+        "gh_client_id_grafana":     _require("GH_CLIENT_ID_GRAFANA"),
+        "gh_client_secret_grafana": _require("GH_CLIENT_SECRET_GRAFANA"),
+    }
+
+
+def _render_chart_templates(vars: dict) -> None:  # noqa: A002
+    """マニフェストテンプレートを rendered/ にレンダリングする。"""
+    os.makedirs(RENDERED_DIR, mode=0o700, exist_ok=True)
+
+    templates = [
+        (os.path.join(ARGOCD_MANIFESTS_DIR, "argocd-config.yaml.tpl"),      "argocd-config.yaml",      0o600),
+        (os.path.join(ARGOCD_MANIFESTS_DIR, "cert-manager-issuers.yaml.tpl"), "cert-manager-issuers.yaml", 0o600),
+        (os.path.join(ARGOCD_MANIFESTS_DIR, "grafana-oauth-secret.yaml.tpl"), "grafana-oauth-secret.yaml", 0o600),
+        (os.path.join(ARGOCD_APPS_DIR,      "infra-apps.yaml.tpl"),           "infra-apps.yaml",           0o640),
+    ]
+
+    for tpl_path, out_name, mode in templates:
+        with open(tpl_path) as f:
+            template = f.read()
+        rendered = _render_terraform_template(template, vars)
+        out_path = os.path.join(RENDERED_DIR, out_name)
+        with open(out_path, "w") as f:
+            f.write(rendered)
+        os.chmod(out_path, mode)
+        print(f"  レンダリング完了: {out_name}")
+
+    # bootstrap.yaml は変数置換なしでコピー
+    out_path = os.path.join(RENDERED_DIR, "bootstrap.yaml")
+    shutil.copy2(ARGOCD_BOOTSTRAP_YAML, out_path)
+    os.chmod(out_path, 0o640)
+    print(f"  コピー完了: bootstrap.yaml")
+
+
+def _setup_kubeconfig(sv1_ip: str) -> None:
+    """sv1 から kubeconfig を取得して ~/.kube/config に保存する。"""
+    os.makedirs(os.path.expanduser("~/.kube"), mode=0o700, exist_ok=True)
+
+    print(f"  {sv1_ip}: /etc/rancher/k3s/k3s.yaml を取得中...")
+    result = subprocess.run(
+        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{sv1_ip}",
+         "sudo cat /etc/rancher/k3s/k3s.yaml"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    kubeconfig = result.stdout
+    # ループバックアドレスをサーバの実 IP に置換
+    kubeconfig = kubeconfig.replace("127.0.0.1", sv1_ip)
+    kubeconfig = kubeconfig.replace("default", "sakura-k3s")
+    # TLS 証明書の SAN にパブリック IP が含まれないため検証をスキップ
+    kubeconfig = re.sub(
+        r"^\s*certificate-authority-data:.*$",
+        "    insecure-skip-tls-verify: true",
+        kubeconfig,
+        flags=re.MULTILINE,
+    )
+
+    with open(KUBECONFIG_PATH, "w") as f:
+        f.write(kubeconfig)
+    os.chmod(KUBECONFIG_PATH, 0o600)
+    print(f"  ~/.kube/config を保存しました (server: https://{sv1_ip}:6443, context: sakura-k3s)")
+
+
+def _kubectl_apply(manifest_path: str) -> None:
+    """KUBECONFIG を設定して kubectl apply を実行する。"""
+    env = {**os.environ, "KUBECONFIG": KUBECONFIG_PATH}
+    subprocess.run(
+        ["kubectl", "apply", "-f", manifest_path],
+        env=env,
+        check=True,
+    )
+    print(f"  適用完了: {os.path.basename(manifest_path)}")
+
+
+def _wait_for_cert_manager(timeout: int = 600) -> None:
+    """cert-manager の namespace・Deployment・CRD が Ready になるまで待機する。"""
+    env = {**os.environ, "KUBECONFIG": KUBECONFIG_PATH}
+    deadline = time.monotonic() + timeout
+
+    print("  cert-manager namespace の作成を待機中...")
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["kubectl", "get", "namespace", "cert-manager"],
+            env=env, capture_output=True,
+        )
+        if r.returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise TimeoutError("cert-manager namespace が作成されませんでした")
+
+    print("  cert-manager Deployment の作成を待機中...")
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["kubectl", "get", "deployment", "cert-manager", "-n", "cert-manager"],
+            env=env, capture_output=True,
+        )
+        if r.returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise TimeoutError("cert-manager Deployment が作成されませんでした")
+
+    print("  cert-manager Deployment の Ready を待機中...")
+    remaining = int(deadline - time.monotonic())
+    subprocess.run(
+        ["kubectl", "wait", "--for=condition=available",
+         "deployment/cert-manager", "-n", "cert-manager",
+         f"--timeout={remaining}s"],
+        env=env, check=True,
+    )
+
+    print("  cert-manager CRD の登録を待機中...")
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["kubectl", "get", "crd", "clusterissuers.cert-manager.io"],
+            env=env, capture_output=True,
+        )
+        if r.returncode == 0:
+            break
+        time.sleep(10)
+    else:
+        raise TimeoutError("cert-manager CRD が登録されませんでした")
+
+    print("  cert-manager-webhook Deployment の Ready を待機中...")
+    remaining = int(deadline - time.monotonic())
+    subprocess.run(
+        ["kubectl", "wait", "--for=condition=available",
+         "deployment/cert-manager-webhook", "-n", "cert-manager",
+         f"--timeout={remaining}s"],
+        env=env, check=True,
+    )
+
+    # Webhook のエンドポイントが実際に登録されるまで少し待つ
+    print("  cert-manager-webhook エンドポイントの Ready を待機中...")
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["kubectl", "get", "endpoints", "cert-manager-webhook",
+             "-n", "cert-manager", "-o", "jsonpath={.subsets[0].addresses[0].ip}"],
+            env=env, capture_output=True, text=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            break
+        time.sleep(5)
+    else:
+        raise TimeoutError("cert-manager-webhook エンドポイントが Ready になりませんでした")
+
+    print("  cert-manager Ready")
+
+
+# ---------------------------------------------------------------------------
+# サブコマンド: install-charts
+# ---------------------------------------------------------------------------
+
+
+def cmd_install_charts() -> None:
+    print("=" * 60)
+    print("install-charts: YAML レンダリングと ArgoCD ブートストラップを行います")
+    print("=" * 60)
+
+    # 1. Terraform outputs からサーバ IP を取得
+    outputs = _get_terraform_output()
+    node_public_ips: dict[str, str] = outputs["node_public_ips"]["value"]
+    sv1_name = sorted(node_public_ips.keys())[0]
+    sv1_ip   = node_public_ips[sv1_name]
+    packet_filter_id: str = outputs["packet_filter_id"]["value"]
+
+    # 2. テンプレート変数を環境変数から収集
+    print("==> テンプレート変数を環境変数から取得中...")
+    chart_vars = _get_chart_vars()
+
+    # 3. YAML テンプレートを rendered/ にレンダリング
+    print("==> YAML テンプレートをレンダリング中...")
+    _render_chart_templates(chart_vars)
+
+    # 4. SSH / k8s API パケットフィルタを現在のグローバル IP で更新 (Codespaces 再起動で IP が変わるため)
+    token, secret, region = get_sakura_env()
+    api_base = get_api_base(region)
+    print("==> 開発環境のグローバル IP を取得中...")
+    my_ip = _get_my_global_ip()
+    print(f"==> グローバル IP: {my_ip}")
+    _add_ssh_packet_filter_rules(packet_filter_id, my_ip, api_base, token, secret)
+
+    # 5. ~/.kube/config をセットアップ
+    print(f"==> {sv1_name} から kubeconfig を取得中...")
+    _setup_kubeconfig(sv1_ip)
+
+    # 6. k8s API ポート (6443) をパケットフィルタで開放
+    _add_tcp_packet_filter_rule(packet_filter_id, "6443", my_ip, api_base, token, secret, "k8s-api")
+
+    # 7. ArgoCD ブートストラップマニフェストを適用
+    try:
+        print("==> マニフェストを kubectl apply 中...")
+        _kubectl_apply(os.path.join(RENDERED_DIR, "bootstrap.yaml"))
+        _kubectl_apply(os.path.join(RENDERED_DIR, "infra-apps.yaml"))
+        _kubectl_apply(os.path.join(RENDERED_DIR, "argocd-config.yaml"))
+        print("==> cert-manager が Ready になるまで待機中 (ArgoCD がデプロイ中)...")
+        _wait_for_cert_manager()
+        _kubectl_apply(os.path.join(RENDERED_DIR, "cert-manager-issuers.yaml"))
+        _kubectl_apply(os.path.join(RENDERED_DIR, "grafana-oauth-secret.yaml"))
+    finally:
+        _remove_tcp_packet_filter_rule(packet_filter_id, "6443", api_base, token, secret, "k8s-api")
+
+    print()
+    print("=" * 60)
+    print("install-charts 完了")
+    print("ArgoCD が cert-manager / traefik / tetragon 等を自動デプロイします。")
+    print(f"  export KUBECONFIG={KUBECONFIG_PATH}")
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
 # サブコマンド: deny-ssh
 # ---------------------------------------------------------------------------
 
@@ -809,26 +1140,29 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "サブコマンド:\n"
-            "  build-infra  ネットワークとサーバを terraform で構築します\n"
-            "  boot         Flatcar Linux をインストールして起動します\n"
-            "  deny-ssh     パケットフィルタで ssh のアクセスを禁止します\n"
-            "  destroy      ネットワークとサーバを terraform で削除します\n"
+            "  build-infra      ネットワークとサーバを terraform で構築します\n"
+            "  boot             Flatcar Linux をインストールして起動します\n"
+            "  install-charts   YAML をレンダリングし ArgoCD ブートストラップを適用します\n"
+            "  deny-ssh         パケットフィルタで ssh のアクセスを禁止します\n"
+            "  destroy          ネットワークとサーバを terraform で削除します\n"
         ),
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("build-infra", help="インフラを構築します")
-    subparsers.add_parser("boot",        help="Flatcar Linux をインストールして起動します")
-    subparsers.add_parser("deny-ssh",    help="SSH アクセスを禁止します")
-    subparsers.add_parser("destroy",     help="インフラを削除します")
+    subparsers.add_parser("build-infra",     help="インフラを構築します")
+    subparsers.add_parser("boot",            help="Flatcar Linux をインストールして起動します")
+    subparsers.add_parser("install-charts",  help="YAML をレンダリングし ArgoCD ブートストラップを適用します")
+    subparsers.add_parser("deny-ssh",        help="SSH アクセスを禁止します")
+    subparsers.add_parser("destroy",         help="インフラを削除します")
 
     args = parser.parse_args()
 
     dispatch = {
-        "build-infra": cmd_build_infra,
-        "boot":        cmd_boot,
-        "deny-ssh":    cmd_deny_ssh,
-        "destroy":     cmd_destroy,
+        "build-infra":    cmd_build_infra,
+        "boot":           cmd_boot,
+        "install-charts": cmd_install_charts,
+        "deny-ssh":       cmd_deny_ssh,
+        "destroy":        cmd_destroy,
     }
     dispatch[args.command]()
 

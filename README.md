@@ -209,14 +209,47 @@ Ubuntu サーバのプロビジョニング、SSH パケットフィルタの設
 インストールには数分かかる。
 
 ```bash
-ssh -i .ssh/id_ed25519 core@<sv1のIP>
+ssh core@<SAKURA_LABEL_PREFIX>-sv1
 sudo journalctl -u install-k3s.service -f     # k3s インストールログ
 sudo journalctl -u install-argocd.service -f  # ArgoCD インストールログ (sv1 のみ)
+```
+
+ArgoCD の Pod が起動していることを確認する。
+
+```bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl get pods -n argocd
 kubectl get nodes
 ```
 
-### 7. SSH アクセスの無効化（オプション）
+### 7. ArgoCD ブートストラップ (install-charts)
+
+YAML テンプレートをレンダリングし、`~/.kube/config` を設定した上で ArgoCD に App of Apps と各種マニフェストを適用する。このコマンドは Codespace から実行する。
+
+```bash
+./setup.py install-charts
+```
+
+実行内容:
+1. `argocd/manifests/*.yaml.tpl` および `argocd/apps/infra-apps.yaml.tpl` を `rendered/` にレンダリング
+2. sv1 から kubeconfig を取得して `~/.kube/config` に保存 (context: `sakura-k3s`)
+3. 以下のマニフェストを `kubectl apply`:
+   - `rendered/bootstrap.yaml` — ArgoCD AppProject + App of Apps
+   - `rendered/infra-apps.yaml` — cert-manager / traefik / tetragon 等の Application 定義
+   - `rendered/argocd-config.yaml` — GitHub OAuth + Ingress 設定
+   - `rendered/cert-manager-issuers.yaml` — Let's Encrypt ClusterIssuer + DigitalOcean DNS トークン
+   - `rendered/grafana-oauth-secret.yaml` — Grafana GitHub OAuth Secret
+
+適用後は ArgoCD が cert-manager / traefik / tetragon などを自動デプロイする。進捗は以下で確認できる。
+
+```bash
+export KUBECONFIG=~/.kube/config
+kubectl get applications -n argocd
+kubectl get pods -n cert-manager
+kubectl get pods -n traefik
+```
+
+### 8. SSH アクセスの無効化（オプション）
 
 作業完了後、SSH のパケットフィルタルールを削除してセキュリティを強化する。
 

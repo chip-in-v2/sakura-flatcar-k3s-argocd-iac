@@ -1,5 +1,5 @@
 # cert-manager ClusterIssuer - Let's Encrypt DNS-01 (DigitalOcean)
-# Terraform apply 後に terraform/scripts/post-apply.sh が適用する
+# Terraform apply 後に rendered/cert-manager-issuers.yaml を kubectl apply で適用する
 apiVersion: v1
 kind: Secret
 metadata:
@@ -43,12 +43,42 @@ spec:
               name: digitalocean-dns
               key: access-token
 ---
-# ワイルドカード証明書
+# ワイルドカード証明書 (traefik namespace)
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: wildcard-tls
   namespace: traefik
+spec:
+  secretName: wildcard-tls
+  issuerRef:
+    name: letsencrypt-${le_environment}
+    kind: ClusterIssuer
+  dnsNames:
+    - "${domain}"
+    - "*.${domain}"
+---
+# ワイルドカード証明書 (argocd namespace)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-tls
+  namespace: argocd
+spec:
+  secretName: wildcard-tls
+  issuerRef:
+    name: letsencrypt-${le_environment}
+    kind: ClusterIssuer
+  dnsNames:
+    - "${domain}"
+    - "*.${domain}"
+---
+# ワイルドカード証明書 (observability namespace)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-tls
+  namespace: observability
 spec:
   secretName: wildcard-tls
   issuerRef:

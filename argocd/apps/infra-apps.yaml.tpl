@@ -18,13 +18,15 @@ spec:
           type: NodePort
         ports:
           web:
-            nodePort: 30080
+            nodePort: 80
+            redirectTo:
+              port: websecure
+              permanent: true
           websecure:
-            nodePort: 30443
+            nodePort: 443
         additionalArguments:
           - "--serversTransport.insecureSkipVerify=true"
           - "--entryPoints.websecure.http.tls=true"
-          # SNI 不一致は接続失敗させる (インターネットからの無差別スキャン対策)
           - "--entryPoints.websecure.http.tls.options=default"
         tlsOptions:
           default:
@@ -224,7 +226,7 @@ spec:
           hosts:
             - "grafana.${domain}"
           tls:
-            - secretName: grafana-tls
+            - secretName: wildcard-tls
               hosts:
                 - "grafana.${domain}"
         grafana.ini:
