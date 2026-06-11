@@ -35,7 +35,6 @@ RENDERED_DIR = os.path.join(SCRIPT_DIR, "rendered")
 ARGOCD_MANIFESTS_DIR = os.path.join(SCRIPT_DIR, "argocd", "manifests")
 ARGOCD_APPS_DIR = os.path.join(SCRIPT_DIR, "argocd", "apps")
 ARGOCD_BOOTSTRAP_YAML = os.path.join(SCRIPT_DIR, "argocd", "bootstrap.yaml")
-KUBECONFIG_PATH = os.path.expanduser("~/.kube/config")
 
 _SSH_CONFIG_BEGIN = "# BEGIN sakura-flatcar-k3s managed section"
 _SSH_CONFIG_END   = "# END sakura-flatcar-k3s managed section"
@@ -97,24 +96,36 @@ def _sakura_api_request(
     token: str,
     secret: str,
     payload: dict | None = None,
+    retries: int = 10,
+    retry_interval: int = 10,
 ) -> dict:
-    """さくらのクラウド API へリクエストを送信し、レスポンスを返す。"""
+    """さくらのクラウド API へリクエストを送信し、レスポンスを返す。
+
+    HTTP 423 (Locked) の場合は retries 回までリトライする。
+    """
     credentials = base64.b64encode(f"{token}:{secret}".encode()).decode()
     headers = {"Authorization": f"Basic {credentials}"}
     data: bytes | None = None
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = resp.read()
-            return json.loads(body) if body else {}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        raise RuntimeError(
-            f"API エラー: {method} {url} → HTTP {e.code}\n{body}"
-        ) from e
+
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read()
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as e:
+            if e.code == 423 and attempt < retries:
+                print(f"  API 423 Locked: {retry_interval} 秒後にリトライします... ({attempt + 1}/{retries})")
+                time.sleep(retry_interval)
+                continue
+            body = e.read().decode(errors="replace")
+            raise RuntimeError(
+                f"API エラー: {method} {url} → HTTP {e.code}\n{body}"
+            ) from e
+    raise RuntimeError(f"API エラー: {method} {url} → リトライ上限に達しました")
 
 
 def _get_server_by_name(
@@ -887,6 +898,7 @@ def _render_chart_templates(vars: dict) -> None:  # noqa: A002
 
     templates = [
         (os.path.join(ARGOCD_MANIFESTS_DIR, "argocd-config.yaml.tpl"),      "argocd-config.yaml",      0o600),
+        (os.path.join(ARGOCD_MANIFESTS_DIR, "argocd-ingress.yaml.tpl"),     "argocd-ingress.yaml",     0o600),
         (os.path.join(ARGOCD_MANIFESTS_DIR, "cert-manager-issuers.yaml.tpl"), "cert-manager-issuers.yaml", 0o600),
         (os.path.join(ARGOCD_MANIFESTS_DIR, "grafana-oauth-secret.yaml.tpl"), "grafana-oauth-secret.yaml", 0o600),
         (os.path.join(ARGOCD_APPS_DIR,      "infra-apps.yaml.tpl"),           "infra-apps.yaml",           0o640),
@@ -909,121 +921,126 @@ def _render_chart_templates(vars: dict) -> None:  # noqa: A002
     print(f"  コピー完了: bootstrap.yaml")
 
 
-def _setup_kubeconfig(sv1_ip: str) -> None:
-    """sv1 から kubeconfig を取得して ~/.kube/config に保存する。"""
-    os.makedirs(os.path.expanduser("~/.kube"), mode=0o700, exist_ok=True)
+def _kubectl_apply_remote(ip: str, manifest_path: str, retries: int = 5, retry_interval: int = 15) -> None:
+    """SSH 経由でリモートサーバに kubectl apply を実行する。
 
-    print(f"  {sv1_ip}: /etc/rancher/k3s/k3s.yaml を取得中...")
-    result = subprocess.run(
-        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{sv1_ip}",
-         "sudo cat /etc/rancher/k3s/k3s.yaml"],
-        capture_output=True,
-        text=True,
+    Webhook 未準備などの一時的なエラーに対し retries 回までリトライする。
+    """
+    with open(manifest_path, "rb") as f:
+        content = f.read()
+    name = os.path.basename(manifest_path)
+    for attempt in range(retries + 1):
+        result = subprocess.run(
+            ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}",
+             "sudo kubectl apply -f -"],
+            input=content,
+        )
+        if result.returncode == 0:
+            print(f"  適用完了: {name}")
+            return
+        if attempt < retries:
+            print(f"  kubectl apply 失敗 ({name}): {retry_interval} 秒後にリトライします... ({attempt + 1}/{retries})")
+            time.sleep(retry_interval)
+        else:
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+
+
+def _kubectl_rollout_restart_remote(ip: str, resource: str, namespace: str) -> None:
+    """SSH 経由でリモートサーバの指定リソースを rollout restart し、Ready を待機する。"""
+    subprocess.run(
+        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}",
+         f"sudo kubectl rollout restart {resource} -n {namespace}"
+         f" && sudo kubectl rollout status {resource} -n {namespace} --timeout=120s"],
         check=True,
     )
-    kubeconfig = result.stdout
-    # ループバックアドレスをサーバの実 IP に置換
-    kubeconfig = kubeconfig.replace("127.0.0.1", sv1_ip)
-    kubeconfig = kubeconfig.replace("default", "sakura-k3s")
-    # TLS 証明書の SAN にパブリック IP が含まれないため検証をスキップ
-    kubeconfig = re.sub(
-        r"^\s*certificate-authority-data:.*$",
-        "    insecure-skip-tls-verify: true",
-        kubeconfig,
-        flags=re.MULTILINE,
-    )
-
-    with open(KUBECONFIG_PATH, "w") as f:
-        f.write(kubeconfig)
-    os.chmod(KUBECONFIG_PATH, 0o600)
-    print(f"  ~/.kube/config を保存しました (server: https://{sv1_ip}:6443, context: sakura-k3s)")
+    print(f"  rollout restart 完了: {resource} ({namespace})")
 
 
-def _kubectl_apply(manifest_path: str) -> None:
-    """KUBECONFIG を設定して kubectl apply を実行する。"""
-    env = {**os.environ, "KUBECONFIG": KUBECONFIG_PATH}
+def _wait_for_cert_manager_remote(ip: str, timeout: int = 600) -> None:
+    """SSH 経由でリモートサーバの cert-manager が Ready になるまで待機する。"""
+    script = r"""#!/bin/bash
+set -e
+TIMEOUT=$1
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
+
+echo "  cert-manager namespace の作成を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get namespace cert-manager 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: cert-manager namespace" >&2; exit 1; }
+
+echo "  cert-manager Deployment の作成を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get deployment cert-manager -n cert-manager 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: cert-manager Deployment" >&2; exit 1; }
+
+echo "  cert-manager Deployment の Ready を待機中..."
+REMAINING=$(( DEADLINE - $(date +%s) ))
+sudo kubectl wait --for=condition=available deployment/cert-manager -n cert-manager --timeout="${REMAINING}s"
+
+echo "  cert-manager CRD の登録を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get crd clusterissuers.cert-manager.io 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: cert-manager CRD" >&2; exit 1; }
+
+echo "  cert-manager-webhook Deployment の Ready を待機中..."
+REMAINING=$(( DEADLINE - $(date +%s) ))
+sudo kubectl wait --for=condition=available deployment/cert-manager-webhook -n cert-manager --timeout="${REMAINING}s"
+
+echo "  cert-manager-webhook エンドポイントの Ready を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    IP=$(sudo kubectl get endpoints cert-manager-webhook -n cert-manager \
+        -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)
+    [ -n "$IP" ] && break
+    sleep 5
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: cert-manager-webhook エンドポイント" >&2; exit 1; }
+
+echo "  cert-manager Ready"
+"""
     subprocess.run(
-        ["kubectl", "apply", "-f", manifest_path],
-        env=env,
+        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}", f"bash -s -- {timeout}"],
+        input=script.encode(),
         check=True,
     )
-    print(f"  適用完了: {os.path.basename(manifest_path)}")
 
 
-def _wait_for_cert_manager(timeout: int = 600) -> None:
-    """cert-manager の namespace・Deployment・CRD が Ready になるまで待機する。"""
-    env = {**os.environ, "KUBECONFIG": KUBECONFIG_PATH}
-    deadline = time.monotonic() + timeout
+def _wait_for_traefik_remote(ip: str, timeout: int = 600) -> None:
+    """SSH 経由でリモートサーバの Traefik CRD が Ready になるまで待機する。"""
+    script = r"""#!/bin/bash
+set -e
+TIMEOUT=$1
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
 
-    print("  cert-manager namespace の作成を待機中...")
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["kubectl", "get", "namespace", "cert-manager"],
-            env=env, capture_output=True,
-        )
-        if r.returncode == 0:
-            break
-        time.sleep(10)
-    else:
-        raise TimeoutError("cert-manager namespace が作成されませんでした")
+echo "  Traefik CRD の登録を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get crd tlsstores.traefik.io 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: Traefik CRD" >&2; exit 1; }
 
-    print("  cert-manager Deployment の作成を待機中...")
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["kubectl", "get", "deployment", "cert-manager", "-n", "cert-manager"],
-            env=env, capture_output=True,
-        )
-        if r.returncode == 0:
-            break
-        time.sleep(10)
-    else:
-        raise TimeoutError("cert-manager Deployment が作成されませんでした")
+echo "  Traefik Deployment の Ready を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get deployment traefik -n traefik 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: Traefik Deployment" >&2; exit 1; }
 
-    print("  cert-manager Deployment の Ready を待機中...")
-    remaining = int(deadline - time.monotonic())
+REMAINING=$(( DEADLINE - $(date +%s) ))
+sudo kubectl wait --for=condition=available deployment/traefik -n traefik --timeout="${REMAINING}s"
+
+echo "  Traefik Ready"
+"""
     subprocess.run(
-        ["kubectl", "wait", "--for=condition=available",
-         "deployment/cert-manager", "-n", "cert-manager",
-         f"--timeout={remaining}s"],
-        env=env, check=True,
+        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}", f"bash -s -- {timeout}"],
+        input=script.encode(),
+        check=True,
     )
-
-    print("  cert-manager CRD の登録を待機中...")
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["kubectl", "get", "crd", "clusterissuers.cert-manager.io"],
-            env=env, capture_output=True,
-        )
-        if r.returncode == 0:
-            break
-        time.sleep(10)
-    else:
-        raise TimeoutError("cert-manager CRD が登録されませんでした")
-
-    print("  cert-manager-webhook Deployment の Ready を待機中...")
-    remaining = int(deadline - time.monotonic())
-    subprocess.run(
-        ["kubectl", "wait", "--for=condition=available",
-         "deployment/cert-manager-webhook", "-n", "cert-manager",
-         f"--timeout={remaining}s"],
-        env=env, check=True,
-    )
-
-    # Webhook のエンドポイントが実際に登録されるまで少し待つ
-    print("  cert-manager-webhook エンドポイントの Ready を待機中...")
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["kubectl", "get", "endpoints", "cert-manager-webhook",
-             "-n", "cert-manager", "-o", "jsonpath={.subsets[0].addresses[0].ip}"],
-            env=env, capture_output=True, text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            break
-        time.sleep(5)
-    else:
-        raise TimeoutError("cert-manager-webhook エンドポイントが Ready になりませんでした")
-
-    print("  cert-manager Ready")
 
 
 # ---------------------------------------------------------------------------
@@ -1059,31 +1076,25 @@ def cmd_install_charts() -> None:
     print(f"==> グローバル IP: {my_ip}")
     _add_ssh_packet_filter_rules(packet_filter_id, my_ip, api_base, token, secret)
 
-    # 5. ~/.kube/config をセットアップ
-    print(f"==> {sv1_name} から kubeconfig を取得中...")
-    _setup_kubeconfig(sv1_ip)
-
-    # 6. k8s API ポート (6443) をパケットフィルタで開放
-    _add_tcp_packet_filter_rule(packet_filter_id, "6443", my_ip, api_base, token, secret, "k8s-api")
-
-    # 7. ArgoCD ブートストラップマニフェストを適用
-    try:
-        print("==> マニフェストを kubectl apply 中...")
-        _kubectl_apply(os.path.join(RENDERED_DIR, "bootstrap.yaml"))
-        _kubectl_apply(os.path.join(RENDERED_DIR, "infra-apps.yaml"))
-        _kubectl_apply(os.path.join(RENDERED_DIR, "argocd-config.yaml"))
-        print("==> cert-manager が Ready になるまで待機中 (ArgoCD がデプロイ中)...")
-        _wait_for_cert_manager()
-        _kubectl_apply(os.path.join(RENDERED_DIR, "cert-manager-issuers.yaml"))
-        _kubectl_apply(os.path.join(RENDERED_DIR, "grafana-oauth-secret.yaml"))
-    finally:
-        _remove_tcp_packet_filter_rule(packet_filter_id, "6443", api_base, token, secret, "k8s-api")
+    # 5. ArgoCD ブートストラップマニフェストを SSH 経由で適用
+    print("==> マニフェストを SSH 経由で kubectl apply 中...")
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "bootstrap.yaml"))
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "infra-apps.yaml"))
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "argocd-config.yaml"))
+    print("==> argocd-server を再起動して設定を反映中...")
+    _kubectl_rollout_restart_remote(sv1_ip, "deployment/argocd-server", "argocd")
+    print("==> cert-manager が Ready になるまで待機中 (ArgoCD がデプロイ中)...")
+    _wait_for_cert_manager_remote(sv1_ip)
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "cert-manager-issuers.yaml"))
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "grafana-oauth-secret.yaml"))
+    print("==> Traefik CRD が Ready になるまで待機中 (ArgoCD がデプロイ中)...")
+    _wait_for_traefik_remote(sv1_ip)
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "argocd-ingress.yaml"))
 
     print()
     print("=" * 60)
     print("install-charts 完了")
     print("ArgoCD が cert-manager / traefik / tetragon 等を自動デプロイします。")
-    print(f"  export KUBECONFIG={KUBECONFIG_PATH}")
     print("=" * 60)
 
 

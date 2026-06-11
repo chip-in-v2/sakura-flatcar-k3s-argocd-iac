@@ -32,7 +32,7 @@ metadata:
     app.kubernetes.io/part-of: argocd
 type: Opaque
 stringData:
-  oidc.github.clientSecret: "${gh_client_secret_argocd}"
+  dex.github.clientSecret: "${gh_client_secret_argocd}"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -52,38 +52,4 @@ metadata:
   namespace: argocd
 data:
   server.insecure: "true"
----
-# Traefik のデフォルト TLS ストア (traefik namespace の wildcard-tls を使用)
-apiVersion: traefik.io/v1alpha1
-kind: TLSStore
-metadata:
-  name: default
-  namespace: traefik
-spec:
-  defaultCertificate:
-    secretName: wildcard-tls
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: argocd-server
-  namespace: argocd
-  annotations:
-    traefik.ingress.kubernetes.io/router.tls: "true"
-spec:
-  ingressClassName: traefik
-  tls:
-    - hosts:
-        - "argocd.${domain}"
-      secretName: wildcard-tls
-  rules:
-    - host: "argocd.${domain}"
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  number: 80
+
