@@ -213,6 +213,32 @@ systemd:
     - name: locksmithd.service
       enabled: true
 
+%{ if auto_shutdown_at_utc ~}
+    # 自動シャットダウン (${auto_shutdown_at_utc} UTC)
+    - name: auto-shutdown.service
+      contents: |
+        [Unit]
+        Description=Automatic shutdown for cost saving
+        After=network-online.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/bin/halt -p
+
+    - name: auto-shutdown.timer
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Trigger automatic shutdown at ${auto_shutdown_at_utc} UTC daily
+
+        [Timer]
+        OnCalendar=*-*-* ${auto_shutdown_at_utc} UTC
+        Persistent=true
+
+        [Install]
+        WantedBy=timers.target
+%{ endif ~}
+
 # ---------------------------------------------------------------
 # ユーザ設定
 # ---------------------------------------------------------------

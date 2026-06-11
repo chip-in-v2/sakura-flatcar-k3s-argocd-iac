@@ -76,3 +76,8 @@ output "domain" {
   description = "DigitalOcean DNS に委譲されたドメイン"
   value       = var.domain
 }
+
+output "auto_shutdown_at_utc" {
+  description = "自動シャットダウンの時刻 (UTC)。空文字列の場合は無効。"
+  value       = var.auto_shutdown_at_utc
+}

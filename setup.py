@@ -651,8 +651,9 @@ def _render_ignition(node_name: str, node_index: int, outputs: dict) -> str:
         "lb_netmask":     str(outputs["lb_netmask"]["value"]),
         "lb_gateway":     outputs["lb_gateway"]["value"],
         "lb_vip_ip":      outputs["lb_global_ip"]["value"],
-        "ssh_public_key": outputs["ssh_public_key_openssh"]["value"].strip(),
-        "domain":         domain,
+        "ssh_public_key":         outputs["ssh_public_key_openssh"]["value"].strip(),
+        "domain":                  domain,
+        "auto_shutdown_at_utc":    outputs.get("auto_shutdown_at_utc", {}).get("value", ""),
     }
 
     rendered_yaml = _render_terraform_template(template, tpl_vars)

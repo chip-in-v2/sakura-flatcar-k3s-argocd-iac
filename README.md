@@ -46,6 +46,7 @@ IaC のツールとしては、Terraform と Ignition(Butane) を使用する。
 |GH_CLIENT_SECRET_GRAFANA|Github Secret Grafana用||必須|
 |GH_CLIENT_ID_ARGOCD|Github ClientID ArgoCD用||必須|
 |GH_CLIENT_SECRET_ARGOCD|Github Secret ArgoCD用||必須|
+|AUTO_SHUTDOWN_UTC|毎日自動シャットダウンする時刻 (UTC)。systemd OnCalendar 形式 (例: `11:00:00` = 20:00 JST)。未設定の場合は自動シャットダウンなし。|11:00:00|なし|
 
 なお、環境変数は CodeSpaces から設定できるようにするため、大文字でなければならない。terraform で利用する変数については TF_VAR_ で始まる環境変数に  postCreateCommand で転記する。
 

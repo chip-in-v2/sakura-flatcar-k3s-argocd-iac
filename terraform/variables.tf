@@ -124,3 +124,12 @@ variable "gh_client_secret_argocd" {
   type        = string
   sensitive   = true
 }
+
+# ---------------------------------------------------------------
+# 自動シャットダウン
+# ---------------------------------------------------------------
+variable "auto_shutdown_at_utc" {
+  description = "自動シャットダウンの時刻 (UTC)。systemd OnCalendar 形式 (例: '11:00:00')。空文字列の場合は自動シャットダウンを無効化する。"
+  type        = string
+  default     = ""
+}
