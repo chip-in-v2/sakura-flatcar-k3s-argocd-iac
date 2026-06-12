@@ -101,5 +101,4 @@ resource "sakuracloud_server" "nodes" {
     ssh_key_ids     = [sakuracloud_ssh_key.main.id]
     disable_pw_auth = true
   }
-
 }

@@ -22,7 +22,6 @@ spec:
   tls:
     - hosts:
         - "argocd.${domain}"
-      secretName: wildcard-tls
   rules:
     - host: "argocd.${domain}"
       http:

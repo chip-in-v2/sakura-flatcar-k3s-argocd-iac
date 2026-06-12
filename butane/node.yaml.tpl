@@ -41,20 +41,6 @@ storage:
           Address=${internal_ip}/24
 
     # ---------------------------------------------------------------
-    # DSR 用 VIP をループバックに付与
-    # lo は ARP を送出しないため LB の ARP オーナーシップと競合しない
-    # ---------------------------------------------------------------
-    - path: /etc/systemd/network/20-lo-vip.network
-      mode: 0644
-      contents:
-        inline: |
-          [Match]
-          Name=lo
-
-          [Address]
-          Address=${lb_vip_ip}/32
-
-    # ---------------------------------------------------------------
     # k3s インストールスクリプト
     # ---------------------------------------------------------------
     - path: /opt/bin/install-k3s.sh
@@ -77,7 +63,9 @@ storage:
               --tls-san "${hostname}.${domain}" \
               --advertise-address "${internal_ip}" \
               --node-ip "${internal_ip}" \
-              --flannel-iface eth1 \
+              --flannel-backend=none \
+              --disable-network-policy \
+              --disable-kube-proxy \
               --service-node-port-range 80-32767 \
               --disable traefik \
               --disable servicelb \
@@ -91,7 +79,9 @@ storage:
               --tls-san "${hostname}.${domain}" \
               --advertise-address "${internal_ip}" \
               --node-ip "${internal_ip}" \
-              --flannel-iface eth1 \
+              --flannel-backend=none \
+              --disable-network-policy \
+              --disable-kube-proxy \
               --service-node-port-range 80-32767 \
               --disable traefik \
               --disable servicelb \
@@ -112,13 +102,44 @@ storage:
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           export PATH=$PATH:/opt/bin
 
-          # k3s が Ready になるまで待機
-          until k3s kubectl get nodes 2>/dev/null | grep -q " Ready"; do
-            echo "Waiting for k3s cluster..."
+          # k3s API が応答するまで待機 (CNI 未インストールのためノードは NotReady のまま)
+          until k3s kubectl get nodes 2>/dev/null; do
+            echo "Waiting for k3s API..."
             sleep 5
           done
 
+          # ---------------------------------------------------------------
+          # Cilium CNI インストール (kube-proxy replacement モード)
+          # flannel-backend=none で起動しているため, ArgoCD より先にインストールする
+          # ---------------------------------------------------------------
+          HELM_VERSION="v3.15.0"
+          curl -sSL "https://get.helm.sh/helm-$${HELM_VERSION}-linux-amd64.tar.gz" | \
+            tar xz -C /tmp
+          HELM=/tmp/linux-amd64/helm
+
+          $HELM repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+          $HELM repo update cilium
+
+          $HELM upgrade --install cilium cilium/cilium \
+            --namespace kube-system \
+            --version ">=1.16.0 <1.17.0" \
+            --set kubeProxyReplacement=true \
+            --set k8sServiceHost="${internal_ip}" \
+            --set k8sServicePort=6443 \
+            --set operator.replicas=1 \
+            --set ipam.mode=kubernetes \
+            --set socketLB.enabled=true \
+            --set localRedirectPolicy=true \
+            --set "hubble.relay.enabled=true" \
+            --set "hubble.ui.enabled=true"
+
+          echo "Waiting for Cilium agents to be ready..."
+          k3s kubectl wait --for=condition=ready pod -l k8s-app=cilium \
+            -n kube-system --timeout=300s
+
+          # ---------------------------------------------------------------
           # ArgoCD namespace と インストール
+          # ---------------------------------------------------------------
           k3s kubectl create namespace argocd --dry-run=client -o yaml | k3s kubectl apply -f -
           k3s kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 

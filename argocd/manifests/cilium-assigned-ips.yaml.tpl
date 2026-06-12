@@ -1,0 +1,141 @@
+# ---------------------------------------------------------------
+# 割り当てIP → 実 Pod へのリダイレクト (CiliumLocalRedirectPolicy)
+#
+# Cilium が kube-proxy replacement (socketLB) モードで動作しているとき、
+# Pod が connect() を発行した際に BPF ソケットフックでインターセプトし、
+# 割り当てIP 宛ての接続を同一ノード上の実 Pod にリダイレクトする。
+# externalIPs と異なり loopback 範囲 (127.x) も使用可能。
+#
+# 割り当てIP 一覧:
+#   greptimedb : 127.0.99.1 (ports: 4000=HTTP API, 4002=MySQL)
+#   grafana    : 127.0.99.2 (port:  3000=HTTP)
+#   argocd     : 127.0.99.3 (port:  80=HTTP insecure → pod:8080)
+#
+# 適用対象通信:
+#   vector  -> greptimedb (127.0.99.1:4000)
+#   grafana -> greptimedb (127.0.99.1:4002)
+#   pod     -> grafana    (127.0.99.2:3000)
+#   pod     -> argocd     (127.0.99.3:80)
+# ---------------------------------------------------------------
+
+# ---------------------------------------------------------------
+# greptimedb 割り当てIP (127.0.99.1:4000 HTTP API)
+# ---------------------------------------------------------------
+apiVersion: "cilium.io/v2"
+kind: CiliumLocalRedirectPolicy
+metadata:
+  name: greptimedb-http
+  namespace: greptimedb
+spec:
+  redirectFrontend:
+    addressMatcher:
+      ip: "127.0.99.1"
+      toPorts:
+        - port: "4000"
+          protocol: TCP
+  redirectBackend:
+    localEndpointSelector:
+      matchLabels:
+        app.greptime.io/component: frontend
+        app.greptime.io/name: greptimedb
+    toPorts:
+      - port: "4000"
+        protocol: TCP
+---
+# ---------------------------------------------------------------
+# greptimedb 割り当てIP (127.0.99.1:4002 MySQL)
+# ---------------------------------------------------------------
+apiVersion: "cilium.io/v2"
+kind: CiliumLocalRedirectPolicy
+metadata:
+  name: greptimedb-mysql
+  namespace: greptimedb
+spec:
+  redirectFrontend:
+    addressMatcher:
+      ip: "127.0.99.1"
+      toPorts:
+        - port: "4002"
+          protocol: TCP
+  redirectBackend:
+    localEndpointSelector:
+      matchLabels:
+        app.greptime.io/component: frontend
+        app.greptime.io/name: greptimedb
+    toPorts:
+      - port: "4002"
+        protocol: TCP
+---
+# ---------------------------------------------------------------
+# grafana 割り当てIP (127.0.99.2:3000)
+# ---------------------------------------------------------------
+apiVersion: "cilium.io/v2"
+kind: CiliumLocalRedirectPolicy
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  redirectFrontend:
+    addressMatcher:
+      ip: "127.0.99.2"
+      toPorts:
+        - port: "3000"
+          protocol: TCP
+  redirectBackend:
+    localEndpointSelector:
+      matchLabels:
+        app.kubernetes.io/name: grafana
+    toPorts:
+      - port: "3000"
+        protocol: TCP
+---
+# ---------------------------------------------------------------
+# argocd-server 割り当てIP (127.0.99.3:80 → pod:8080)
+# argocd-server は insecure モードで 8080 をリッスン
+# ---------------------------------------------------------------
+apiVersion: "cilium.io/v2"
+kind: CiliumLocalRedirectPolicy
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  redirectFrontend:
+    addressMatcher:
+      ip: "127.0.99.3"
+      toPorts:
+        - port: "80"
+          protocol: TCP
+  redirectBackend:
+    localEndpointSelector:
+      matchLabels:
+        app.kubernetes.io/name: argocd-server
+    toPorts:
+      - port: "8080"
+        protocol: TCP
+---
+# ---------------------------------------------------------------
+# grafana Ingress (grafana Helm chart の ingress.enabled=false に対応)
+# ---------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: observability
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - "grafana.${domain}"
+  rules:
+    - host: "grafana.${domain}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80

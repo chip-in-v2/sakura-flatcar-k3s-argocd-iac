@@ -11,9 +11,9 @@ resource "sakuracloud_internet" "lb_router" {
 }
 
 locals {
-  lb_cidr      = "${sakuracloud_internet.lb_router.network_address}/${sakuracloud_internet.lb_router.netmask}"
-  lb_mgmt_ip   = cidrhost(local.lb_cidr, 4)  # LB 管理 IP
-  lb_vip_ip    = cidrhost(local.lb_cidr, 5)  # VIP (DNS が指すパブリック IP)
+  lb_cidr    = "${sakuracloud_internet.lb_router.network_address}/${sakuracloud_internet.lb_router.netmask}"
+  lb_mgmt_ip = cidrhost(local.lb_cidr, 4) # LB 管理 IP
+  lb_vip_ip  = cidrhost(local.lb_cidr, 5) # VIP (DNS が指すパブリック IP)
 }
 
 resource "sakuracloud_load_balancer" "lb" {

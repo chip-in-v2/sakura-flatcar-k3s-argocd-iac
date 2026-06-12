@@ -1,4 +1,46 @@
 # ---------------------------------------------------------------
+# Cilium (CNI + kube-proxy replacement + 割り当てIPインターセプト)
+# 注意: 初回ブートストラップは butane/node.yaml.tpl の install-argocd.sh で実施済み。
+# ArgoCD は以後のアップデート・設定変更を管理する。
+# ---------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium
+  namespace: argocd
+spec:
+  project: infra
+  source:
+    repoURL: https://helm.cilium.io
+    chart: cilium
+    targetRevision: "1.16.*"
+    helm:
+      values: |
+        kubeProxyReplacement: "true"
+        k8sServiceHost: "${init_internal_ip}"
+        k8sServicePort: "6443"
+        operator:
+          replicas: 1
+        ipam:
+          mode: kubernetes
+        # 割り当てIP (127.0.99.x) への接続をソケットレベルでインターセプトするため socketLB を有効化
+        socketLB:
+          enabled: true
+        localRedirectPolicy: true
+        hubble:
+          relay:
+            enabled: true
+          ui:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+# ---------------------------------------------------------------
 # Traefik (Ingress Controller + L7 TLS 終端)
 # ---------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
@@ -16,6 +58,9 @@ spec:
       values: |
         service:
           type: NodePort
+          spec:
+            externalIPs:
+              - "${lb_vip_ip}"
         ports:
           web:
             nodePort: 80
@@ -30,7 +75,7 @@ spec:
           - "--entryPoints.websecure.http.tls.options=default"
         tlsOptions:
           default:
-            sniStrict: true
+            sniStrict: false
         logs:
           general:
             format: json
@@ -164,7 +209,7 @@ spec:
               type: greptimedb_logs
               inputs:
                 - parse_json_logs
-              endpoint: "http://greptimedb-frontend.greptimedb.svc.cluster.local:4000"
+              endpoint: "http://127.0.99.1:4000"
               table: k3s_logs
               dbname: public
   destination:
@@ -221,14 +266,7 @@ spec:
     helm:
       valuesObject:
         ingress:
-          enabled: true
-          ingressClassName: traefik
-          hosts:
-            - "grafana.${domain}"
-          tls:
-            - secretName: wildcard-tls
-              hosts:
-                - "grafana.${domain}"
+          enabled: false
         grafana.ini:
           server:
             domain: "grafana.${domain}"
@@ -256,7 +294,7 @@ spec:
             datasources:
               - name: GreptimeDB
                 type: mysql
-                url: greptimedb-frontend.greptimedb.svc.cluster.local:4002
+                url: "127.0.99.1:4002"
                 database: public
                 isDefault: true
   destination:

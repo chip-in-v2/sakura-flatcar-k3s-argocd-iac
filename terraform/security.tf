@@ -33,18 +33,18 @@ resource "sakuracloud_packet_filter" "public" {
 
   # HTTPS
   expression {
-    protocol            = "tcp"
-    destination_port    = "443"
-    allow               = true
-    description         = "HTTPS"
+    protocol         = "tcp"
+    destination_port = "443"
+    allow            = true
+    description      = "HTTPS"
   }
 
   # HTTP
   expression {
-    protocol            = "tcp"
-    destination_port    = "80"
-    allow               = true
-    description         = "HTTP"
+    protocol         = "tcp"
+    destination_port = "80"
+    allow            = true
+    description      = "HTTP"
   }
 
   # k3s API (内部ロードバランサからのみ使用するが、HealthCheck用に一時的に許可)

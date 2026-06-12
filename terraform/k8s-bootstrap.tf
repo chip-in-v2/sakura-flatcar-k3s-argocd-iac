@@ -8,6 +8,8 @@
 
 locals {
   rendered_dir = "${path.module}/../rendered"
+  # init サーバの内部 IP (servers.tf と同じロジック: cidrhost(192.168.100.0/24, 1))
+  init_internal_ip = cidrhost("192.168.100.0/24", 1)
 }
 
 # ---------------------------------------------------------------
@@ -45,8 +47,10 @@ resource "local_sensitive_file" "cert_manager_issuers" {
 # ---------------------------------------------------------------
 resource "local_sensitive_file" "infra_apps" {
   content = templatefile("${path.module}/../argocd/apps/infra-apps.yaml.tpl", {
-    domain          = var.domain
-    gh_organization = var.gh_organization
+    domain           = var.domain
+    gh_organization  = var.gh_organization
+    init_internal_ip = local.init_internal_ip
+    lb_vip_ip        = local.lb_vip_ip
   })
   filename        = "${local.rendered_dir}/infra-apps.yaml"
   file_permission = "0640"
@@ -71,5 +75,18 @@ resource "local_sensitive_file" "grafana_oauth_secret" {
 resource "local_file" "argocd_bootstrap" {
   content         = file("${path.module}/../argocd/bootstrap.yaml")
   filename        = "${local.rendered_dir}/bootstrap.yaml"
+  file_permission = "0640"
+}
+
+# ---------------------------------------------------------------
+# cilium-assigned-ips.yaml の生成
+# Cilium externalIPs サービス (割り当てIP → 实 Pod DNAT) および
+# grafana Ingress (traefik → grafana 割り当てIP ルーティング)
+# ---------------------------------------------------------------
+resource "local_file" "cilium_assigned_ips" {
+  content = templatefile("${path.module}/../argocd/manifests/cilium-assigned-ips.yaml.tpl", {
+    domain = var.domain
+  })
+  filename        = "${local.rendered_dir}/cilium-assigned-ips.yaml"
   file_permission = "0640"
 }

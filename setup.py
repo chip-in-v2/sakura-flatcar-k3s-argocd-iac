@@ -593,7 +593,10 @@ def _render_terraform_template(template: str, vars: dict) -> str:  # noqa: A002
       - %{ if var_name ~}...%{ else ~}...%{ endif ~}
       - %{ if var_name ~}...%{ endif ~}
     """
-    result = template
+    # $${...} は Terraform のエスケープ構文。先にプレースホルダへ変換し、
+    # 最後に元の ${...} に戻す (シェルスクリプト内の変数参照を保護する)。
+    _ESCAPE_PLACEHOLDER = "\x00ESCAPED_DOLLAR\x00"
+    result = template.replace("$${", _ESCAPE_PLACEHOLDER + "{")
 
     # if / else / endif (else あり)
     result = re.sub(
@@ -625,6 +628,9 @@ def _render_terraform_template(template: str, vars: dict) -> str:  # noqa: A002
         return str(vars[name])
 
     result = re.sub(r'\$\{(\w+)\}', _replace_var, result)
+
+    # エスケープされた $${...} を元の ${...} に戻す
+    result = result.replace(_ESCAPE_PLACEHOLDER + "{", "${")
     return result
 
 
@@ -902,6 +908,7 @@ def _render_chart_templates(vars: dict) -> None:  # noqa: A002
         (os.path.join(ARGOCD_MANIFESTS_DIR, "argocd-ingress.yaml.tpl"),     "argocd-ingress.yaml",     0o600),
         (os.path.join(ARGOCD_MANIFESTS_DIR, "cert-manager-issuers.yaml.tpl"), "cert-manager-issuers.yaml", 0o600),
         (os.path.join(ARGOCD_MANIFESTS_DIR, "grafana-oauth-secret.yaml.tpl"), "grafana-oauth-secret.yaml", 0o600),
+        (os.path.join(ARGOCD_MANIFESTS_DIR, "cilium-assigned-ips.yaml.tpl"),   "cilium-assigned-ips.yaml",   0o640),
         (os.path.join(ARGOCD_APPS_DIR,      "infra-apps.yaml.tpl"),           "infra-apps.yaml",           0o640),
     ]
 
@@ -922,10 +929,11 @@ def _render_chart_templates(vars: dict) -> None:  # noqa: A002
     print(f"  コピー完了: bootstrap.yaml")
 
 
-def _kubectl_apply_remote(ip: str, manifest_path: str, retries: int = 5, retry_interval: int = 15) -> None:
+def _kubectl_apply_remote(ip: str, manifest_path: str, retries: int = 5, retry_interval: int = 15, ignore_namespace_errors: bool = False) -> None:
     """SSH 経由でリモートサーバに kubectl apply を実行する。
 
     Webhook 未準備などの一時的なエラーに対し retries 回までリトライする。
+    ignore_namespace_errors=True の場合、名前空間未存在エラーは無視して続行する。
     """
     with open(manifest_path, "rb") as f:
         content = f.read()
@@ -935,10 +943,23 @@ def _kubectl_apply_remote(ip: str, manifest_path: str, retries: int = 5, retry_i
             ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}",
              "sudo kubectl apply -f -"],
             input=content,
+            capture_output=True,
         )
+        if result.stdout:
+            print(result.stdout.decode(errors="replace"), end="")
         if result.returncode == 0:
             print(f"  適用完了: {name}")
             return
+        stderr = result.stderr.decode(errors="replace")
+        if ignore_namespace_errors and all(
+            'namespaces "' in line and "not found" in line
+            for line in stderr.splitlines()
+            if line.startswith("Error")
+        ):
+            print(f"  適用完了 (一部 namespace 未存在のためスキップ): {name}")
+            return
+        if stderr:
+            print(stderr, end="")
         if attempt < retries:
             print(f"  kubectl apply 失敗 ({name}): {retry_interval} 秒後にリトライします... ({attempt + 1}/{retries})")
             time.sleep(retry_interval)
@@ -1011,6 +1032,44 @@ echo "  cert-manager Ready"
     )
 
 
+def _wait_for_argocd_remote(ip: str, timeout: int = 600) -> None:
+    """SSH 経由でリモートサーバの ArgoCD が Ready になるまで待機する。"""
+    script = r"""#!/bin/bash
+set -e
+TIMEOUT=$1
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
+
+echo "  argocd namespace の作成を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get namespace argocd 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: argocd namespace" >&2; exit 1; }
+
+echo "  ArgoCD CRD の登録を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get crd applications.argoproj.io 2>/dev/null && break
+    sleep 10
+done
+[ "$(date +%s)" -lt "$DEADLINE" ] || { echo "タイムアウト: ArgoCD CRD" >&2; exit 1; }
+
+echo "  argocd-server Deployment の Ready を待機中..."
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    sudo kubectl get deployment argocd-server -n argocd 2>/dev/null && break
+    sleep 10
+done
+REMAINING=$(( DEADLINE - $(date +%s) ))
+sudo kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout="${REMAINING}s"
+
+echo "  ArgoCD Ready"
+"""
+    subprocess.run(
+        ["ssh", *SSH_OPTS, f"{FLATCAR_SSH_USER}@{ip}", f"bash -s -- {timeout}"],
+        input=script.encode(),
+        check=True,
+    )
+
+
 def _wait_for_traefik_remote(ip: str, timeout: int = 600) -> None:
     """SSH 経由でリモートサーバの Traefik CRD が Ready になるまで待機する。"""
     script = r"""#!/bin/bash
@@ -1057,13 +1116,18 @@ def cmd_install_charts() -> None:
     # 1. Terraform outputs からサーバ IP を取得
     outputs = _get_terraform_output()
     node_public_ips: dict[str, str] = outputs["node_public_ips"]["value"]
+    node_private_ips: dict[str, str] = outputs["node_private_ips"]["value"]
     sv1_name = sorted(node_public_ips.keys())[0]
     sv1_ip   = node_public_ips[sv1_name]
+    init_internal_ip = node_private_ips[sorted(node_private_ips.keys())[0]]
+    lb_vip_ip: str = outputs["lb_global_ip"]["value"]
     packet_filter_id: str = outputs["packet_filter_id"]["value"]
 
     # 2. テンプレート変数を環境変数から収集
     print("==> テンプレート変数を環境変数から取得中...")
     chart_vars = _get_chart_vars()
+    chart_vars["init_internal_ip"] = init_internal_ip
+    chart_vars["lb_vip_ip"] = lb_vip_ip
 
     # 3. YAML テンプレートを rendered/ にレンダリング
     print("==> YAML テンプレートをレンダリング中...")
@@ -1078,6 +1142,8 @@ def cmd_install_charts() -> None:
     _add_ssh_packet_filter_rules(packet_filter_id, my_ip, api_base, token, secret)
 
     # 5. ArgoCD ブートストラップマニフェストを SSH 経由で適用
+    print("==> ArgoCD が Ready になるまで待機中...")
+    _wait_for_argocd_remote(sv1_ip)
     print("==> マニフェストを SSH 経由で kubectl apply 中...")
     _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "bootstrap.yaml"))
     _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "infra-apps.yaml"))
@@ -1088,6 +1154,7 @@ def cmd_install_charts() -> None:
     _wait_for_cert_manager_remote(sv1_ip)
     _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "cert-manager-issuers.yaml"))
     _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "grafana-oauth-secret.yaml"))
+    _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "cilium-assigned-ips.yaml"), ignore_namespace_errors=True)
     print("==> Traefik CRD が Ready になるまで待機中 (ArgoCD がデプロイ中)...")
     _wait_for_traefik_remote(sv1_ip)
     _kubectl_apply_remote(sv1_ip, os.path.join(RENDERED_DIR, "argocd-ingress.yaml"))
