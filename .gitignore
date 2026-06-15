@@ -17,3 +17,4 @@ rendered/
 .DS_Store
 .cache/
 __pycache__/
+.logs/

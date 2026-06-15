@@ -24,10 +24,13 @@ resource "sakuracloud_switch" "internal" {
 }
 
 # ---------------------------------------------------------------
-# Ubuntu パブリックアーカイブ (22.04 LTS)
+# Ubuntu パブリックアーカイブ (22.04 LTS cloudimg)
+# cloud-init 対応イメージを選択するため名前に (cloudimg) を含むものを使用
 # ---------------------------------------------------------------
 data "sakuracloud_archive" "ubuntu" {
-  os_type = "ubuntu2204"
+  filter {
+    names = ["Ubuntu 22.04", "(cloudimg)"]
+  }
 }
 
 # ---------------------------------------------------------------
@@ -92,13 +95,44 @@ resource "sakuracloud_server" "nodes" {
     user_ip_address = cidrhost("192.168.100.0/24", index(local.node_names, each.key) + 1)
   }
 
-  # ディスク修正でグローバルIPとSSH公開鍵を設定
-  disk_edit_parameter {
-    hostname        = each.key
-    ip_address      = cidrhost(local.lb_cidr, index(local.node_names, each.key) + 6)
-    netmask         = sakuracloud_internet.lb_router.netmask
-    gateway         = sakuracloud_internet.lb_router.gateway
-    ssh_key_ids     = [sakuracloud_ssh_key.main.id]
-    disable_pw_auth = true
-  }
+  # cloud-init でホスト名・静的IP・SSH公開鍵を設定
+  # (disk_edit_parameter はディスクが2枚の場合に対象ディスクの特定に失敗することがあるため非使用)
+  user_data = <<-EOT
+    #cloud-config
+    hostname: ${each.key}
+    preserve_hostname: true
+
+    ssh_pwauth: false
+
+    ssh_authorized_keys:
+      - ${trimspace(tls_private_key.ssh_key.public_key_openssh)}
+
+    write_files:
+      - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        content: "network: {config: disabled}\n"
+      - path: /etc/netplan/99-static.yaml
+        permissions: '0600'
+        content: |
+          network:
+            version: 2
+            ethernets:
+              ens3:
+                dhcp4: false
+                addresses:
+                  - ${cidrhost(local.lb_cidr, index(local.node_names, each.key) + 6)}/${sakuracloud_internet.lb_router.netmask}
+                routes:
+                  - to: default
+                    via: ${sakuracloud_internet.lb_router.gateway}
+                nameservers:
+                  addresses: [8.8.8.8, 1.1.1.1]
+              ens4:
+                dhcp4: false
+                addresses:
+                  - ${cidrhost("192.168.100.0/24", index(local.node_names, each.key) + 1)}/24
+
+    runcmd:
+      - echo "127.0.1.1 ${each.key}" >> /etc/hosts
+      - rm -f /etc/netplan/50-cloud-init.yaml
+      - netplan apply
+    EOT
 }

@@ -61,6 +61,7 @@ spec:
           spec:
             externalIPs:
               - "${lb_vip_ip}"
+${node_lb_ips_yaml}
         ports:
           web:
             nodePort: 80

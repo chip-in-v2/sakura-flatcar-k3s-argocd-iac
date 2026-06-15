@@ -19,9 +19,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -31,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TERRAFORM_DIR = os.path.join(SCRIPT_DIR, "terraform")
 BUTANE_TPL = os.path.join(SCRIPT_DIR, "butane", "node.yaml.tpl")
 SSH_KEY_PATH = os.path.join(SCRIPT_DIR, ".ssh", "id_ed25519")
+KNOWN_HOSTS_PATH = os.path.join(SCRIPT_DIR, ".ssh", "known_hosts")
 RENDERED_DIR = os.path.join(SCRIPT_DIR, "rendered")
 ARGOCD_MANIFESTS_DIR = os.path.join(SCRIPT_DIR, "argocd", "manifests")
 ARGOCD_APPS_DIR = os.path.join(SCRIPT_DIR, "argocd", "apps")
@@ -44,8 +48,8 @@ FLATCAR_SSH_USER = "core"
 
 SSH_OPTS = [
     "-i", SSH_KEY_PATH,
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
+    "-o", "StrictHostKeyChecking=yes",
     "-o", "ConnectTimeout=10",
     "-o", "BatchMode=yes",
 ]
@@ -55,9 +59,40 @@ FLATCAR_INSTALL_URL = (
     "https://raw.githubusercontent.com/flatcar/init/flatcar-master/bin/flatcar-install"
 )
 
+LOGS_DIR = os.path.join(SCRIPT_DIR, ".logs")
+_console_lock = threading.Lock()
+
+
 # ---------------------------------------------------------------------------
-# 環境変数 / 認証情報
+# ノードロガー
 # ---------------------------------------------------------------------------
+
+
+class _NodeLogger:
+    """並列実行時にコンソール出力とファイルログを分離するロガー。
+
+    log()    : ファイルにのみ記録する。
+    status() : ファイルに記録し、コンソールに [node] プレフィックス付きで出力する。
+    """
+
+    def __init__(self, node_name: str, log_path: str) -> None:
+        self.node_name = node_name
+        self.log_path = log_path
+        os.makedirs(os.path.dirname(log_path), mode=0o755, exist_ok=True)
+        self._file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+
+    def log(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._file.write(f"[{ts}] {msg}\n")
+        self._file.flush()
+
+    def status(self, msg: str) -> None:
+        self.log(msg)
+        with _console_lock:
+            print(f"[{self.node_name}] {msg}", flush=True)
+
+    def close(self) -> None:
+        self._file.close()
 
 
 def get_sakura_env() -> tuple[str, str, str]:
@@ -165,6 +200,7 @@ def _wait_for_server_instance_status(
     token: str,
     secret: str,
     timeout: int = 300,
+    logger: "_NodeLogger | None" = None,
 ) -> None:
     """サーバの Instance.Status が target_status になるまで待機する。"""
     deadline = time.monotonic() + timeout
@@ -173,7 +209,11 @@ def _wait_for_server_instance_status(
         status = server["Instance"]["Status"]
         if status == target_status:
             return
-        print(f"    サーバ {server['Name']}: ステータス={status}, 待機中...")
+        msg = f"サーバ {server['Name']}: ステータス={status}, 待機中..."
+        if logger:
+            logger.log(msg)
+        else:
+            print(f"    {msg}")
         time.sleep(10)
     raise TimeoutError(
         f"サーバ {server_id}: ステータス '{target_status}' への移行が"
@@ -186,12 +226,19 @@ def _swap_server_disk_order(
     api_base: str,
     token: str,
     secret: str,
+    logger: "_NodeLogger | None" = None,
 ) -> None:
     """サーバの 1番目と 2番目のディスクを入れ替える。
 
     サーバは停止状態である必要があります。
     先頭のディスクが /dev/vda (ブートディスク) になります。
     """
+    def _log(msg: str) -> None:
+        if logger:
+            logger.log(msg)
+        else:
+            print(f"    {msg}")
+
     disks = server.get("Disks", [])
     if len(disks) < 2:
         raise ValueError(
@@ -202,7 +249,7 @@ def _swap_server_disk_order(
     # 新しい順序: [disks[1], disks[0], disks[2:]]
     new_order = [disks[1], disks[0]] + disks[2:]
     new_ids = [d["ID"] for d in new_order]
-    print(f"    ディスク順序を変更: {[d['ID'] for d in disks]} → {new_ids}")
+    _log(f"ディスク順序を変更: {[d['ID'] for d in disks]} → {new_ids}")
 
     # 全ディスクを切断
     for disk in disks:
@@ -435,27 +482,75 @@ def _remove_tcp_packet_filter_rule(
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_ssh(ip: str, user: str, timeout: int = 300) -> None:
-    """SSH 接続が確立できるまで最大 timeout 秒待機する。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["ssh", *SSH_OPTS, f"{user}@{ip}", "true"],
+def _register_host_key(ip: str, keyscan_output: str, logger: "_NodeLogger | None" = None) -> None:
+    """サーバの SSH ホスト公開鍵を known_hosts に登録する。
+
+    既存のエントリを削除してから新しい公開鍵を追加する。
+    OS 入れ替え後 (Ubuntu → Flatcar) の鍵更新にも対応する。
+    """
+    os.makedirs(os.path.dirname(KNOWN_HOSTS_PATH), mode=0o700, exist_ok=True)
+
+    # 古いエントリを削除
+    if os.path.exists(KNOWN_HOSTS_PATH):
+        subprocess.run(
+            ["ssh-keygen", "-R", ip, "-f", KNOWN_HOSTS_PATH],
             capture_output=True,
         )
-        if result.returncode == 0:
-            return
+        # ssh-keygen -R が作成するバックアップを削除
+        old_path = KNOWN_HOSTS_PATH + ".old"
+        if os.path.exists(old_path):
+            os.unlink(old_path)
+
+    # known_hosts に追記
+    with open(KNOWN_HOSTS_PATH, "a") as f:
+        f.write(keyscan_output if keyscan_output.endswith("\n") else keyscan_output + "\n")
+    os.chmod(KNOWN_HOSTS_PATH, 0o600)
+    msg = f"{ip}: SSH ホスト公開鍵を登録しました"
+    if logger:
+        logger.log(msg)
+    else:
+        print(f"  {msg}")
+
+
+def _wait_for_ssh(ip: str, user: str, timeout: int = 300, logger: "_NodeLogger | None" = None) -> None:
+    """SSH 接続が確立できるまで最大 timeout 秒待機する。
+
+    SSH デーモンが起動したらホスト公開鍵を ssh-keyscan で取得して
+    known_hosts に登録し、StrictHostKeyChecking=yes で接続する。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # ホスト公開鍵をスキャン (SSH デーモン起動確認も兼ねる)
+        scan = subprocess.run(
+            ["ssh-keyscan", "-T", "5", ip],
+            capture_output=True, text=True,
+        )
+        if scan.returncode == 0 and scan.stdout.strip():
+            _register_host_key(ip, scan.stdout, logger)
+            result = subprocess.run(
+                ["ssh", *SSH_OPTS, f"{user}@{ip}", "true"],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return
         time.sleep(5)
     raise TimeoutError(f"{ip}: SSH 接続がタイムアウトしました ({timeout} 秒)")
 
 
-def _wait_for_any_ssh(ip: str, timeout: int = 600) -> str:
+def _wait_for_any_ssh(ip: str, timeout: int = 600, logger: "_NodeLogger | None" = None) -> str:
     """Ubuntu または Flatcar への SSH が確立できるまで待機し、OS 名を返す。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        os_name = _detect_running_os(ip)
-        if os_name:
-            return os_name
+        # ホスト公開鍵をスキャンして登録 (OS 入れ替え後は鍵が変わるため毎回更新)
+        scan = subprocess.run(
+            ["ssh-keyscan", "-T", "5", ip],
+            capture_output=True, text=True,
+        )
+        if scan.returncode == 0 and scan.stdout.strip():
+            _register_host_key(ip, scan.stdout, logger)
+            os_name = _detect_running_os(ip)
+            if os_name:
+                return os_name
         time.sleep(10)
     raise TimeoutError(f"{ip}: SSH 接続がタイムアウトしました ({timeout} 秒)")
 
@@ -518,8 +613,8 @@ def _setup_ssh_config(node_public_ips: dict[str, str]) -> None:
             f"    HostName {ip}\n"
             f"    User {FLATCAR_SSH_USER}\n"
             f"    IdentityFile {SSH_KEY_PATH}\n"
-            f"    StrictHostKeyChecking no\n"
-            f"    UserKnownHostsFile /dev/null"
+            f"    StrictHostKeyChecking yes\n"
+            f"    UserKnownHostsFile {KNOWN_HOSTS_PATH}"
         )
     lines.append(_SSH_CONFIG_END)
 
@@ -679,9 +774,15 @@ def _render_ignition(node_name: str, node_index: int, outputs: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _install_flatcar_to_target_disk(ip: str, ignition_json: str) -> None:
+def _install_flatcar_to_target_disk(ip: str, ignition_json: str, logger: "_NodeLogger | None" = None) -> None:
     """Ubuntu 上で flatcar-install を実行して /dev/vdb に Flatcar をインストールする。"""
-    print(f"  {ip}: Ignition ファイルを転送中...")
+    def _log(msg: str) -> None:
+        if logger:
+            logger.log(msg)
+        else:
+            print(f"  {msg}")
+
+    _log(f"{ip}: Ignition ファイルを転送中...")
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".ign", prefix="node-", delete=False
@@ -690,12 +791,17 @@ def _install_flatcar_to_target_disk(ip: str, ignition_json: str) -> None:
         tmp_ign = f.name
 
     try:
-        subprocess.run(
+        scp_r = subprocess.run(
             ["scp", *SSH_OPTS, tmp_ign, f"{UBUNTU_SSH_USER}@{ip}:/tmp/node.ign"],
-            check=True,
+            capture_output=True, text=True,
         )
+        for line in (scp_r.stdout + scp_r.stderr).splitlines():
+            if line:
+                _log(line)
+        if scp_r.returncode != 0:
+            raise subprocess.CalledProcessError(scp_r.returncode, scp_r.args)
 
-        print(f"  {ip}: flatcar-install を実行中 (時間がかかります)...")
+        _log(f"{ip}: flatcar-install を実行中 (時間がかかります)...")
 
         # udevadm settle のタイムアウト問題に対処するパッチを適用してからインストール
         install_cmd = (
@@ -707,7 +813,7 @@ def _install_flatcar_to_target_disk(ip: str, ignition_json: str) -> None:
             " && sudo flatcar-install -d /dev/vdb -i /tmp/node.ign"
         )
 
-        subprocess.run(
+        install_r = subprocess.run(
             [
                 "ssh", "-T", *SSH_OPTS,
                 "-o", "ServerAliveInterval=30",
@@ -716,11 +822,99 @@ def _install_flatcar_to_target_disk(ip: str, ignition_json: str) -> None:
                 install_cmd,
             ],
             stdin=subprocess.DEVNULL,
-            check=True,
+            capture_output=True,
+            text=True,
         )
-        print(f"  {ip}: Flatcar インストール完了")
+        for line in (install_r.stdout + install_r.stderr).splitlines():
+            if line:
+                _log(line)
+        if install_r.returncode != 0:
+            raise subprocess.CalledProcessError(install_r.returncode, install_r.args)
+        _log(f"{ip}: Flatcar インストール完了")
     finally:
         os.unlink(tmp_ign)
+
+
+# ---------------------------------------------------------------------------
+# boot: ノード単体処理 (並列実行単位)
+# ---------------------------------------------------------------------------
+
+
+def _boot_one_node(
+    i: int,
+    node_name: str,
+    ip: str,
+    outputs: dict,
+    api_base: str,
+    token: str,
+    secret: str,
+    logger: "_NodeLogger",
+) -> None:
+    """1台のノードに対して Flatcar インストール〜起動確認を行う。"""
+    logger.status("開始")
+
+    server    = _get_server_by_name(node_name, api_base, token, secret)
+    server_id = server["ID"]
+
+    # サーバが停止中の場合は起動する
+    instance_status = server["Instance"]["Status"]
+    if instance_status == "down":
+        logger.status("停止中 → 起動します")
+        _power_on_server(server_id, api_base, token, secret)
+        _wait_for_server_instance_status(server_id, "up", api_base, token, secret, logger=logger)
+
+    # 1. 現在起動している OS を確認
+    logger.status("起動中の OS を検出中...")
+    current_os = _wait_for_any_ssh(ip, logger=logger)
+    logger.status(f"現在の OS: {current_os}")
+
+    if current_os == "flatcar":
+        # Flatcar が起動中 → Ubuntu から起動し直す
+        logger.status("Flatcar 起動中 → Ubuntu で再起動します")
+        _power_off_server(server_id, api_base, token, secret)
+        _wait_for_server_instance_status(server_id, "down", api_base, token, secret, logger=logger)
+        logger.log("シャットダウン完了")
+
+        server = _get_server_by_name(node_name, api_base, token, secret)
+        _swap_server_disk_order(server, api_base, token, secret, logger=logger)
+        logger.log("ディスク順序を入れ替えました (Ubuntu が先頭)")
+
+        _power_on_server(server_id, api_base, token, secret)
+        _wait_for_server_instance_status(server_id, "up", api_base, token, secret, logger=logger)
+        _wait_for_ssh(ip, UBUNTU_SSH_USER, logger=logger)
+        logger.log("Ubuntu 起動確認")
+
+    elif current_os != "ubuntu":
+        raise RuntimeError(f"Ubuntu への接続に失敗しました (OS: {current_os})")
+
+    # 2. Ignition ファイルを生成
+    logger.status("Ignition ファイルを生成中...")
+    ignition_json = _render_ignition(node_name, i, outputs)
+    logger.log("Ignition ファイル生成完了")
+
+    # 3. flatcar-install を実行して /dev/vdb にインストール
+    logger.status("Flatcar インストール中 (時間がかかります)...")
+    _install_flatcar_to_target_disk(ip, ignition_json, logger=logger)
+
+    # 4. シャットダウン
+    logger.status("シャットダウン中...")
+    _power_off_server(server_id, api_base, token, secret)
+    _wait_for_server_instance_status(server_id, "down", api_base, token, secret, logger=logger)
+    logger.log("シャットダウン完了")
+
+    # 5. ディスク順序を入れ替え (Flatcar を先頭に)
+    server = _get_server_by_name(node_name, api_base, token, secret)
+    _swap_server_disk_order(server, api_base, token, secret, logger=logger)
+    logger.log("ディスク順序を入れ替えました (Flatcar が先頭)")
+
+    # 6. サーバを起動
+    _power_on_server(server_id, api_base, token, secret)
+    _wait_for_server_instance_status(server_id, "up", api_base, token, secret, logger=logger)
+
+    # 7. Flatcar の起動を確認
+    logger.status("Flatcar の起動を確認中...")
+    _wait_for_ssh(ip, FLATCAR_SSH_USER, timeout=600, logger=logger)
+    logger.status("Flatcar Container Linux 起動確認 ✓")
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +969,7 @@ def cmd_build_infra() -> None:
 
 def cmd_boot() -> None:
     print("=" * 60)
-    print("boot: Flatcar Linux をインストールして起動します")
+    print("boot: Flatcar Linux をインストールして起動します (並列実行)")
     print("=" * 60)
 
     outputs = _get_terraform_output()
@@ -786,87 +980,55 @@ def cmd_boot() -> None:
     token, secret, region = get_sakura_env()
     api_base = get_api_base(region)
 
-    # SSH パケットフィルタを現在のグローバル IP で更新 (Codespaces 再起動で IP が変わるため)
+    # SSH パケットフィルタを現在のグローバル IP で更新
     print("==> 開発環境のグローバル IP を取得中...")
     my_ip = _get_my_global_ip()
     print(f"==> グローバル IP: {my_ip}")
     _add_ssh_packet_filter_rules(packet_filter_id, my_ip, api_base, token, secret)
 
-    for i, node_name in enumerate(node_names):
-        ip = node_public_ips[node_name]
-        print()
-        print(f"--- {node_name} ({ip}) ---")
+    # butane を事前にインストール (並列実行前に済ませる)
+    _ensure_butane()
 
-        server    = _get_server_by_name(node_name, api_base, token, secret)
-        server_id = server["ID"]
+    start_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+    os.makedirs(LOGS_DIR, mode=0o755, exist_ok=True)
+    print(f"==> ログ出力先: {LOGS_DIR}/boot-<サーバ名>-{start_dt}.log")
+    print(f"==> {len(node_names)} 台を並列でブートします: {', '.join(node_names)}")
+    print()
 
-        # サーバが停止中の場合は起動する
-        instance_status = server["Instance"]["Status"]
-        if instance_status == "down":
-            print(f"  サーバが停止中。起動します...")
-            _power_on_server(server_id, api_base, token, secret)
-            _wait_for_server_instance_status(server_id, "up", api_base, token, secret)
+    futures = {}
+    errors: dict[str, Exception] = {}
 
-        # 1. 現在起動しているOSを確認
-        print(f"  起動中の OS を検出中...")
-        current_os = _wait_for_any_ssh(ip)
-        print(f"  現在の OS: {current_os}")
+    with ThreadPoolExecutor(max_workers=len(node_names)) as executor:
+        for i, node_name in enumerate(node_names):
+            ip = node_public_ips[node_name]
+            log_path = os.path.join(LOGS_DIR, f"boot-{node_name}-{start_dt}.log")
+            logger = _NodeLogger(node_name, log_path)
+            future = executor.submit(
+                _boot_one_node, i, node_name, ip, outputs, api_base, token, secret, logger
+            )
+            futures[future] = (node_name, logger)
 
-        if current_os == "flatcar":
-            # Flatcar が起動中 → Ubuntu から起動し直す
-            print(f"  Flatcar が起動中。Ubuntu で再起動します...")
-
-            _power_off_server(server_id, api_base, token, secret)
-            _wait_for_server_instance_status(server_id, "down", api_base, token, secret)
-            print(f"  シャットダウン完了")
-
-            # ディスク情報を再取得してブートストラップディスクが先頭になるよう入れ替え
-            server = _get_server_by_name(node_name, api_base, token, secret)
-            _swap_server_disk_order(server, api_base, token, secret)
-            print(f"  ディスク順序を入れ替えました (Ubuntu が先頭)")
-
-            _power_on_server(server_id, api_base, token, secret)
-            _wait_for_server_instance_status(server_id, "up", api_base, token, secret)
-            print(f"  サーバ起動中... SSH を待機します")
-            _wait_for_ssh(ip, UBUNTU_SSH_USER)
-            print(f"  Ubuntu 起動確認")
-
-        elif current_os != "ubuntu":
-            print(f"  エラー: Ubuntu への接続に失敗しました。このサーバをスキップします。")
-            continue
-
-        # 2. Ignition ファイルを生成
-        print(f"  Ignition ファイルを生成中...")
-        ignition_json = _render_ignition(node_name, i, outputs)
-        print(f"  Ignition ファイル生成完了")
-
-        # 3. flatcar-install を実行して /dev/vdb にインストール
-        _install_flatcar_to_target_disk(ip, ignition_json)
-
-        # 4. シャットダウン
-        print(f"  シャットダウン中...")
-        _power_off_server(server_id, api_base, token, secret)
-        _wait_for_server_instance_status(server_id, "down", api_base, token, secret)
-        print(f"  シャットダウン完了")
-
-        # 5. ディスク順序を入れ替え (ターゲットディスク = Flatcar を先頭に)
-        server = _get_server_by_name(node_name, api_base, token, secret)
-        _swap_server_disk_order(server, api_base, token, secret)
-        print(f"  ディスク順序を入れ替えました (Flatcar が先頭)")
-
-        # 6. サーバを起動
-        _power_on_server(server_id, api_base, token, secret)
-        _wait_for_server_instance_status(server_id, "up", api_base, token, secret)
-        print(f"  サーバ起動中...")
-
-        # 7. Flatcar の起動を確認
-        print(f"  Flatcar の起動を確認中...")
-        _wait_for_ssh(ip, FLATCAR_SSH_USER, timeout=600)
-        print(f"  {node_name}: Flatcar Container Linux 起動確認")
+        for future in as_completed(futures):
+            node_name, logger = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                errors[node_name] = e
+                with _console_lock:
+                    print(f"[{node_name}] エラー: {e}", flush=True)
+                logger.log(f"エラー: {e}")
+            finally:
+                logger.close()
 
     print()
     print("=" * 60)
-    print("boot 完了")
+    if errors:
+        print(f"boot 完了 (エラーあり: {', '.join(errors.keys())})")
+        for name, err in errors.items():
+            print(f"  {name}: {err}")
+        sys.exit(1)
+    else:
+        print("boot 完了 (全ノード成功)")
     print("=" * 60)
 
 
@@ -1128,6 +1290,12 @@ def cmd_install_charts() -> None:
     chart_vars = _get_chart_vars()
     chart_vars["init_internal_ip"] = init_internal_ip
     chart_vars["lb_vip_ip"] = lb_vip_ip
+    # LB ヘルスチェック宛先 (各ノードの eth0 IP) を Traefik externalIPs に追加するための YAML 行
+    node_lb_ips_yaml = "\n".join(
+        f'              - "{ip}"'
+        for ip in sorted(node_public_ips.values())
+    )
+    chart_vars["node_lb_ips_yaml"] = node_lb_ips_yaml
 
     # 3. YAML テンプレートを rendered/ にレンダリング
     print("==> YAML テンプレートをレンダリング中...")

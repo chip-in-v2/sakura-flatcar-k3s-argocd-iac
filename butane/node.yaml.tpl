@@ -134,6 +134,10 @@ storage:
             --set "hubble.ui.enabled=true"
 
           echo "Waiting for Cilium agents to be ready..."
+          until k3s kubectl get pods -n kube-system -l k8s-app=cilium 2>/dev/null | grep -q cilium; do
+            echo "  Cilium pods not yet created, waiting..."
+            sleep 5
+          done
           k3s kubectl wait --for=condition=ready pod -l k8s-app=cilium \
             -n kube-system --timeout=300s
 
