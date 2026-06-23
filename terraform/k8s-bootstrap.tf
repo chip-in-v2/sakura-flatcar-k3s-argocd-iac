@@ -47,10 +47,11 @@ resource "local_sensitive_file" "cert_manager_issuers" {
 # ---------------------------------------------------------------
 resource "local_sensitive_file" "infra_apps" {
   content = templatefile("${path.module}/../argocd/apps/infra-apps.yaml.tpl", {
-    domain           = var.domain
-    gh_organization  = var.gh_organization
-    init_internal_ip = local.init_internal_ip
-    lb_vip_ip        = local.lb_vip_ip
+    domain             = var.domain
+    gh_organization    = var.gh_organization
+    init_internal_ip   = local.init_internal_ip
+    lb_vip_ip          = local.lb_vip_ip
+    node_lb_ips_yaml   = join("\n", [for ip in sort(values({ for name, s in sakuracloud_server.nodes : name => s.network_interface[0].user_ip_address })) : "              - \"${ip}\""])
   })
   filename        = "${local.rendered_dir}/infra-apps.yaml"
   file_permission = "0640"
