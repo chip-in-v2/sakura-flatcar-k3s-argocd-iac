@@ -1,0 +1,47 @@
+---
+# install-infra-apps.yml – ArgoCD ブートストラップ (install-charts に相当)
+- name: Prepare facts and SSH
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+    - get_my_ip
+    - packet_filter_ssh_allow
+
+  tasks:
+    - name: Add sv1 host dynamically
+      ansible.builtin.add_host:
+        name: "{{ sv1_name }}"
+        ansible_host: "{{ tf_outputs.node_public_ips.value[sv1_name] }}"
+        groups: _sv1
+        tf_outputs: "{{ tf_outputs }}"
+        my_ip: "{{ my_ip }}"
+      vars:
+        sv1_name: "{{ tf_outputs.node_public_ips.value.keys() | sort | first }}"
+
+- name: Apply ArgoCD bootstrap on sv1
+  hosts: _sv1
+  gather_facts: false
+  tasks:
+    - name: Wait for Flatcar SSH
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 300
+      delegate_to: localhost
+
+    - name: Update known_hosts
+      ansible.builtin.include_role:
+        name: update_known_hosts
+
+    - name: Wait for ArgoCD to be ready
+      ansible.builtin.include_role:
+        name: wait_for_argocd
+
+    - name: Push infra-apps and register app-of-apps
+      ansible.builtin.include_role:
+        name: push_infra_apps
+
+    - name: Apply ArgoCD manifests
+      ansible.builtin.include_role:
+        name: argocd_bootstrap

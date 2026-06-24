@@ -1,0 +1,30 @@
+---
+# terraform_outputs role – terraform output -json を取得し tf_outputs ファクトを設定する
+
+- name: Get Terraform outputs
+  community.general.terraform:
+    project_path: "{{ terraform_dir }}"
+    state: present
+    # 既存インフラに変更を加えずに output だけ取得するため
+    # --refresh-only に相当するオプションが community.general では使えないため
+    # command モジュールで直接取得する
+  when: false  # このタスクは使用しない (下の shell モジュールを使う)
+
+- name: Run terraform output -json
+  ansible.builtin.command:
+    cmd: terraform output -json
+    chdir: "{{ terraform_dir }}"
+  register: _tf_raw
+  changed_when: false
+  delegate_to: localhost
+  run_once: true
+
+- name: Parse Terraform outputs
+  ansible.builtin.set_fact:
+    tf_outputs: "{{ _tf_raw.stdout | from_json }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Distribute tf_outputs to all hosts
+  ansible.builtin.set_fact:
+    tf_outputs: "{{ hostvars['localhost']['tf_outputs'] }}"

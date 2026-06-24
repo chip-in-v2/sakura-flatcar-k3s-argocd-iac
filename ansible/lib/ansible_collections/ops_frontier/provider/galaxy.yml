@@ -1,0 +1,13 @@
+namespace: ops_frontier
+name: provider
+version: 1.0.0
+readme: README.md
+authors:
+  - ops-frontier
+description: "さくらのクラウド Ansible modules"
+license:
+  - MIT
+tags:
+  - sakura
+  - cloud
+repository: https://github.com/chip-in-v2/sakura-flatcar-k3s-argocd-iac

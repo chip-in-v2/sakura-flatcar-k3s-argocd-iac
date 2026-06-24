@@ -1,0 +1,25 @@
+---
+# shutdown-servers.yml – 全サーバをシャットダウンする
+- name: Prepare
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+
+  tasks:
+    - name: Add server hosts
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+        groups: _shutdown_servers
+        tf_outputs: "{{ tf_outputs }}"
+      loop: "{{ tf_outputs.node_public_ips.value | dict2items }}"
+
+- name: Shutdown all servers
+  hosts: _shutdown_servers
+  gather_facts: false
+  strategy: free
+  vars:
+    server_target_state: "off"
+  roles:
+    - server_power

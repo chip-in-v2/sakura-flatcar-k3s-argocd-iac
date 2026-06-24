@@ -1,0 +1,26 @@
+---
+# server_power role – サーバの電源を操作する
+# 変数: server_target_state (on/off), server_name (省略時は inventory_hostname)
+
+- name: Get server info
+  ops_frontier.provider.sakura_server_info:
+    name: "{{ server_name | default(inventory_hostname) }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  register: _srv
+  delegate_to: localhost
+
+- name: Set power state
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _srv.server.id }}"
+    state: "{{ server_target_state }}"
+    timeout: 300
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+
+- name: Show power state
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: 電源 {{ server_target_state }} 完了"

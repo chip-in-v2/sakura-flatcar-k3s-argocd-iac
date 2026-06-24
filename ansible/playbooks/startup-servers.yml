@@ -1,0 +1,25 @@
+---
+# startup-servers.yml – 全サーバを起動する
+- name: Prepare
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+
+  tasks:
+    - name: Add server hosts
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+        groups: _startup_servers
+        tf_outputs: "{{ tf_outputs }}"
+      loop: "{{ tf_outputs.node_public_ips.value | dict2items }}"
+
+- name: Start all servers
+  hosts: _startup_servers
+  gather_facts: false
+  strategy: free
+  vars:
+    server_target_state: "on"
+  roles:
+    - server_power

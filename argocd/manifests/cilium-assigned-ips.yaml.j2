@@ -127,9 +127,9 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - "grafana.${domain}"
+        - "grafana.{{ domain }}"
   rules:
-    - host: "grafana.${domain}"
+    - host: "grafana.{{ domain }}"
       http:
         paths:
           - path: /

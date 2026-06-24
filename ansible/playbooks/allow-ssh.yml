@@ -1,0 +1,36 @@
+---
+# allow-ssh.yml – パケットフィルタに SSH 許可ルールを追加し known_hosts を更新する
+- name: Allow SSH access
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+    - get_my_ip
+    - packet_filter_ssh_allow
+
+  tasks:
+    - name: Add server hosts
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+        groups: _ssh_servers
+        tf_outputs: "{{ tf_outputs }}"
+      loop: "{{ tf_outputs.node_public_ips.value | dict2items }}"
+
+- name: Update known_hosts for all servers
+  hosts: _ssh_servers
+  gather_facts: false
+  roles:
+    - update_known_hosts
+
+- name: Update ssh config
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Set tf_outputs for setup_ssh_config
+      ansible.builtin.set_fact:
+        tf_outputs: "{{ hostvars['localhost']['tf_outputs'] }}"
+
+    - name: Update ~/.ssh/config
+      ansible.builtin.include_role:
+        name: setup_ssh_config

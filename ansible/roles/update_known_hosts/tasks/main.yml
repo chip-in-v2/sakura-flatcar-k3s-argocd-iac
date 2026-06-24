@@ -1,0 +1,47 @@
+---
+# update_known_hosts role – サーバの SSH ホスト公開鍵を known_hosts に登録する
+
+- name: Ensure .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ ssh_key_path | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+
+- name: Scan SSH host keys
+  ansible.builtin.command:
+    cmd: "ssh-keyscan -T 10 {{ ansible_host }}"
+  register: _keyscan
+  changed_when: false
+  failed_when: _keyscan.rc != 0 or _keyscan.stdout | trim == ""
+  delegate_to: localhost
+  retries: 3
+  delay: 5
+
+- name: Remove old host key entries
+  ansible.builtin.command:
+    cmd: "ssh-keygen -R {{ ansible_host }} -f {{ known_hosts_path }}"
+  delegate_to: localhost
+  changed_when: true
+  failed_when: false
+
+- name: Remove backup known_hosts file
+  ansible.builtin.file:
+    path: "{{ known_hosts_path }}.old"
+    state: absent
+  delegate_to: localhost
+
+- name: Add new host key to known_hosts
+  ansible.builtin.lineinfile:
+    path: "{{ known_hosts_path }}"
+    line: "{{ item }}"
+    create: true
+    mode: "0600"
+  loop: "{{ _keyscan.stdout_lines }}"
+  delegate_to: localhost
+  when: item | trim != ""
+
+- name: Show registered host
+  ansible.builtin.debug:
+    msg: "{{ ansible_host }}: SSH ホスト公開鍵を登録しました"

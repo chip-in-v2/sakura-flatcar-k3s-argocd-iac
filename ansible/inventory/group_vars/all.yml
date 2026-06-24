@@ -1,0 +1,27 @@
+---
+# グローバル変数 (全ホスト共通)
+
+workspace_dir: "/workspaces/sakura-flatcar-k3s-argocd-iac"
+terraform_dir: "{{ workspace_dir }}/terraform"
+ssh_key_path: "{{ workspace_dir }}/.ssh/id_ed25519"
+known_hosts_path: "{{ workspace_dir }}/.ssh/known_hosts"
+rendered_dir: "{{ workspace_dir }}/rendered"
+
+infra_apps_chart_name: "infra-apps"
+infra_apps_chart_version: "0.1.8"
+
+ubuntu_ssh_user: "ubuntu"
+flatcar_ssh_user: "core"
+
+# さくらのクラウド 認証情報 (環境変数から取得)
+sakura_access_token: >-
+  {{ lookup('env', 'SAKURA_ACCESS_TOKEN')
+     or lookup('env', 'TF_VAR_sakura_access_token') }}
+sakura_access_token_secret: >-
+  {{ lookup('env', 'SAKURA_ACCESS_TOKEN_SECRET')
+     or lookup('env', 'TF_VAR_sakura_access_token_secret') }}
+sakura_region: >-
+  {{ lookup('env', 'SAKURA_REGION')
+     or lookup('env', 'TF_VAR_sakura_region')
+     | default('is1c', true) }}
+sakura_api_base: "https://secure.sakura.ad.jp/cloud/zone/{{ sakura_region }}/api/cloud/1.1"

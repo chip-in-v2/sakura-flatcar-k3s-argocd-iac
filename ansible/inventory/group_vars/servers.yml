@@ -1,0 +1,16 @@
+---
+# servers グループ共通の SSH 接続設定
+# ansible_host は各 playbook の terraform_outputs role で動的に上書きされる
+
+# Flatcar には python3 が存在しないため portable Python を使用
+ansible_python_interpreter: /opt/bin/python3
+
+ansible_user: "{{ flatcar_ssh_user }}"
+ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+ansible_ssh_common_args: >-
+  -o StrictHostKeyChecking=accept-new
+  -o UserKnownHostsFile={{ known_hosts_path }}
+  -o ConnectTimeout=15
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=10
+  -o BatchMode=yes

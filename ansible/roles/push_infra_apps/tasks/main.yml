@@ -1,0 +1,188 @@
+---
+# push_infra_apps role – infra-apps を Helm OCI レジストリに push し
+#                        app-of-apps Application を ArgoCD に登録する
+
+- name: Set infra-apps template variables
+  ansible.builtin.set_fact:
+    domain: "{{ lookup('env', 'DOMAIN') or lookup('env', 'TF_VAR_domain') }}"
+    do_pat: "{{ lookup('env', 'DO_PAT') or lookup('env', 'TF_VAR_do_pat') }}"
+    le_environment: >-
+      {{ lookup('env', 'LE_ENVIRONMENT')
+         or lookup('env', 'TF_VAR_le_environment')
+         | default('production', true) }}
+    gh_organization: >-
+      {{ lookup('env', 'GH_ORGANIZATION')
+         or lookup('env', 'TF_VAR_gh_organization')
+         | default('chip-in-v2', true) }}
+    gh_client_id_argocd: "{{ lookup('env', 'GH_CLIENT_ID_ARGOCD') or lookup('env', 'TF_VAR_gh_client_id_argocd') }}"
+    gh_client_secret_argocd: "{{ lookup('env', 'GH_CLIENT_SECRET_ARGOCD') or lookup('env', 'TF_VAR_gh_client_secret_argocd') }}"
+    gh_client_id_grafana: "{{ lookup('env', 'GH_CLIENT_ID_GRAFANA') or lookup('env', 'TF_VAR_gh_client_id_grafana') }}"
+    gh_client_secret_grafana: "{{ lookup('env', 'GH_CLIENT_SECRET_GRAFANA') or lookup('env', 'TF_VAR_gh_client_secret_grafana') }}"
+    init_internal_ip: "{{ tf_outputs.node_private_ips.value[tf_outputs.node_private_ips.value.keys() | sort | first] }}"
+    lb_vip_ip: "{{ tf_outputs.lb_global_ip.value }}"
+    node_public_ips: "{{ tf_outputs.node_public_ips.value }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Ensure rendered/ directory exists
+  ansible.builtin.file:
+    path: "{{ rendered_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+
+- name: Render argocd manifests
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ rendered_dir }}/{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: "{{ workspace_dir }}/argocd/manifests/argocd-config.yaml.j2",       dest: "argocd-config.yaml",       mode: "0600" }
+    - { src: "{{ workspace_dir }}/argocd/manifests/argocd-ingress.yaml.j2",      dest: "argocd-ingress.yaml",      mode: "0600" }
+    - { src: "{{ workspace_dir }}/argocd/manifests/cert-manager-issuers.yaml.j2", dest: "cert-manager-issuers.yaml", mode: "0600" }
+    - { src: "{{ workspace_dir }}/argocd/manifests/grafana-oauth-secret.yaml.j2", dest: "grafana-oauth-secret.yaml", mode: "0600" }
+    - { src: "{{ workspace_dir }}/argocd/manifests/cilium-assigned-ips.yaml.j2",  dest: "cilium-assigned-ips.yaml",  mode: "0640" }
+    - { src: "{{ workspace_dir }}/argocd/apps/infra-apps.yaml.j2",               dest: "infra-apps.yaml",           mode: "0640" }
+  delegate_to: localhost
+  run_once: true
+
+- name: Copy bootstrap.yaml (no template variables)
+  ansible.builtin.copy:
+    src: "{{ workspace_dir }}/argocd/bootstrap.yaml"
+    dest: "{{ rendered_dir }}/bootstrap.yaml"
+    mode: "0640"
+  delegate_to: localhost
+  run_once: true
+
+- name: Create Helm chart temp directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: infra-apps-chart-
+  register: _chart_tmpdir
+  delegate_to: localhost
+  run_once: true
+
+- name: Create chart directory structure
+  ansible.builtin.file:
+    path: "{{ _chart_tmpdir.path }}/{{ infra_apps_chart_name }}/templates"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+
+- name: Write Chart.yaml
+  ansible.builtin.copy:
+    content: |
+      apiVersion: v2
+      name: {{ infra_apps_chart_name }}
+      description: ArgoCD Application リソース (infra apps)
+      type: application
+      version: {{ infra_apps_chart_version }}
+    dest: "{{ _chart_tmpdir.path }}/{{ infra_apps_chart_name }}/Chart.yaml"
+  delegate_to: localhost
+  run_once: true
+
+- name: Copy rendered infra-apps.yaml to chart templates
+  ansible.builtin.copy:
+    src: "{{ rendered_dir }}/infra-apps.yaml"
+    dest: "{{ _chart_tmpdir.path }}/{{ infra_apps_chart_name }}/templates/applications.yaml"
+  delegate_to: localhost
+  run_once: true
+
+- name: Package Helm chart
+  ansible.builtin.command:
+    cmd: "helm package {{ _chart_tmpdir.path }}/{{ infra_apps_chart_name }} --destination {{ _chart_tmpdir.path }}"
+  delegate_to: localhost
+  run_once: true
+  changed_when: true
+
+- name: Login to OCI registry
+  ansible.builtin.command:
+    cmd: >
+      helm registry login {{ tf_outputs.container_registry_fqdn.value }}
+      --username {{ tf_outputs.container_registry_push_user.value }}
+      --password-stdin
+    stdin: "{{ tf_outputs.container_registry_push_password.value }}"
+  delegate_to: localhost
+  run_once: true
+  changed_when: true
+  no_log: true
+
+- name: Push Helm chart to OCI registry
+  ansible.builtin.command:
+    cmd: >
+      helm push
+      {{ _chart_tmpdir.path }}/{{ infra_apps_chart_name }}-{{ infra_apps_chart_version }}.tgz
+      oci://{{ tf_outputs.container_registry_fqdn.value }}
+  delegate_to: localhost
+  run_once: true
+  changed_when: true
+
+- name: Cleanup chart temp directory
+  ansible.builtin.file:
+    path: "{{ _chart_tmpdir.path }}"
+    state: absent
+  delegate_to: localhost
+  run_once: true
+
+- name: Apply OCI registry secret (argocd)
+  ansible.builtin.shell:
+    cmd: |
+      cat << 'EOF' | kubectl apply -f -
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: sakura-container-registry
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      type: Opaque
+      stringData:
+        name: sakura-container-registry
+        type: helm
+        url: "{{ tf_outputs.container_registry_fqdn.value }}"
+        username: "{{ tf_outputs.container_registry_pull_user.value }}"
+        password: "{{ tf_outputs.container_registry_pull_password.value }}"
+        enableOCI: "true"
+      EOF
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+
+- name: Apply app-of-apps Application
+  ansible.builtin.shell:
+    cmd: |
+      cat << 'EOF' | kubectl apply -f -
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: app-of-apps
+        namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.io
+      spec:
+        project: infra
+        source:
+          repoURL: "{{ tf_outputs.container_registry_fqdn.value }}"
+          chart: {{ infra_apps_chart_name }}
+          targetRevision: "{{ infra_apps_chart_version }}"
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: argocd
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+      EOF
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+
+- name: Show push completion
+  ansible.builtin.debug:
+    msg: >-
+      app-of-apps 登録完了:
+      oci://{{ tf_outputs.container_registry_fqdn.value }}/{{ infra_apps_chart_name }}:{{ infra_apps_chart_version }}

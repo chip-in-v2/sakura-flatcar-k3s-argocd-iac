@@ -1,0 +1,15 @@
+---
+# destroy.yml – terraform destroy でインフラを削除する
+- name: Destroy infrastructure
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Confirm destroy
+      ansible.builtin.pause:
+        prompt: "インフラを削除します。続行するには Enter を押してください (Ctrl+C で中断)"
+
+    - name: Terraform destroy
+      community.general.terraform:
+        project_path: "{{ terraform_dir }}"
+        state: absent
+        force_init: true

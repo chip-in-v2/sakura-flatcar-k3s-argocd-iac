@@ -1,0 +1,26 @@
+---
+# boot.yml – Flatcar Linux をインストールして起動する (全サーバ並列)
+- name: Prepare facts on localhost
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+    - get_my_ip
+    - packet_filter_ssh_allow
+
+  tasks:
+    - name: Add server hosts dynamically
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+        groups: _boot_servers
+        tf_outputs: "{{ tf_outputs }}"
+        my_ip: "{{ my_ip }}"
+      loop: "{{ tf_outputs.node_public_ips.value | dict2items }}"
+
+- name: Boot each node (Flatcar install)
+  hosts: _boot_servers
+  gather_facts: false
+  strategy: free
+  roles:
+    - boot_node

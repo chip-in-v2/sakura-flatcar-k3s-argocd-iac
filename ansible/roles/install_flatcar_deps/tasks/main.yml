@@ -1,0 +1,18 @@
+---
+# install_flatcar_deps role – Ubuntu サーバに flatcar-install をインストールする
+
+- name: Install required packages and flatcar-install
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      echo nameserver 8.8.8.8 | sudo tee /etc/resolv.conf > /dev/null
+      sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bzip2 wget curl
+      curl -fsSLO 'https://raw.githubusercontent.com/flatcar/init/flatcar-master/bin/flatcar-install'
+      sudo install -o root -g root -m 0755 flatcar-install /usr/local/bin/
+      rm -f flatcar-install
+  vars:
+    ansible_user: "{{ ubuntu_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_python_interpreter: /usr/bin/python3
+  changed_when: true

@@ -1,0 +1,13 @@
+---
+# packet_filter_ssh_deny role – パケットフィルタから SSH ルールを削除する
+
+- name: Remove SSH rules from packet filter
+  ops_frontier.provider.sakura_packet_filter:
+    packet_filter_id: "{{ tf_outputs.packet_filter_id.value }}"
+    state: absent
+    rule_type: ssh
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  run_once: true

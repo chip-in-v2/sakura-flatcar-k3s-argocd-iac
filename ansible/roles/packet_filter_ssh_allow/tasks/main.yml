@@ -1,0 +1,14 @@
+---
+# packet_filter_ssh_allow role – パケットフィルタに SSH 許可ルールを追加する
+
+- name: Add SSH allow rules to packet filter
+  ops_frontier.provider.sakura_packet_filter:
+    packet_filter_id: "{{ tf_outputs.packet_filter_id.value }}"
+    state: present
+    rule_type: ssh
+    source_network: "{{ my_ip }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  run_once: true

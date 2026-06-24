@@ -1,6 +1,4 @@
 # ArgoCD Ingress + Traefik TLSStore
-# Traefik CRD が登録された後に適用する
-# Traefik のデフォルト TLS ストア (traefik namespace の wildcard-tls を使用)
 apiVersion: traefik.io/v1alpha1
 kind: TLSStore
 metadata:
@@ -21,9 +19,9 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - "argocd.${domain}"
+        - "argocd.{{ domain }}"
   rules:
-    - host: "argocd.${domain}"
+    - host: "argocd.{{ domain }}"
       http:
         paths:
           - path: /

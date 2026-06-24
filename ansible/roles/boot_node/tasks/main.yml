@@ -1,0 +1,354 @@
+---
+# boot_node role – Ubuntu → Flatcar インストールの全工程
+#
+# 前提条件:
+#   - tf_outputs ファクトが設定済み (terraform_outputs role を事前に実行)
+#   - ansible_host が正しく設定済み (set_ansible_host role を事前に実行)
+#   - my_ip ファクトが設定済み (get_my_ip role を事前に実行)
+#
+# このロールは各サーバホストに対して実行される。
+# Sakura API 呼び出しは delegate_to: localhost で行う。
+
+# ---------------------------------------------------------------
+# 1. サーバ情報取得・電源 ON
+# ---------------------------------------------------------------
+- name: Get server info from Sakura Cloud
+  ops_frontier.provider.sakura_server_info:
+    name: "{{ inventory_hostname }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  register: _server_info
+  delegate_to: localhost
+
+- name: Power on server if currently down
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _server_info.server.id }}"
+    state: on
+    timeout: 120
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  when: _server_info.server.instance_status == "down"
+
+# ---------------------------------------------------------------
+# 2. 現在起動中の OS を検出
+# ---------------------------------------------------------------
+- name: Scan SSH host key (initial)
+  ansible.builtin.command:
+    cmd: "ssh-keyscan -T 10 {{ ansible_host }}"
+  register: _keyscan_init
+  delegate_to: localhost
+  until: _keyscan_init.rc == 0 and _keyscan_init.stdout | trim != ""
+  retries: 30
+  delay: 10
+
+- name: Register initial host key
+  ansible.builtin.shell:
+    cmd: |
+      ssh-keygen -R {{ ansible_host }} -f {{ known_hosts_path }} 2>/dev/null || true
+      echo "{{ _keyscan_init.stdout }}" >> {{ known_hosts_path }}
+      chmod 600 {{ known_hosts_path }}
+  delegate_to: localhost
+  changed_when: true
+
+- name: Detect OS (try ubuntu user)
+  ansible.builtin.raw: cat /etc/os-release
+  register: _os_ubuntu
+  ignore_errors: true
+  ignore_unreachable: true
+  vars:
+    ansible_user: "{{ ubuntu_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      -o ConnectTimeout=10
+      -o BatchMode=yes
+
+- name: Detect OS (try core/flatcar user)
+  ansible.builtin.raw: cat /etc/os-release
+  register: _os_core
+  ignore_errors: true
+  vars:
+    ansible_user: "{{ flatcar_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      -o ConnectTimeout=10
+      -o BatchMode=yes
+  when: (_os_ubuntu.rc | default(-1)) != 0 or 'ID=ubuntu' not in (_os_ubuntu.stdout | default(''))
+
+- name: Determine current OS
+  ansible.builtin.set_fact:
+    _current_os: >-
+      {%- if (_os_ubuntu.rc | default(-1)) == 0 and 'ID=ubuntu' in (_os_ubuntu.stdout | default('')) -%}
+      ubuntu
+      {%- elif _os_core is defined and (_os_core.rc | default(-1)) == 0 and 'ID=flatcar' in (_os_core.stdout | default('')) -%}
+      flatcar
+      {%- else -%}
+      unknown
+      {%- endif -%}
+
+- name: Fail if OS is unknown
+  ansible.builtin.fail:
+    msg: "OS を検出できませんでした (ubuntu でも flatcar でもない)"
+  when: _current_os | trim == "unknown"
+
+# ---------------------------------------------------------------
+# 3. Flatcar 起動中 → Ubuntu で再起動
+# ---------------------------------------------------------------
+- name: "[Flatcar] Power off to switch to Ubuntu"
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _server_info.server.id }}"
+    state: off
+    timeout: 180
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  when: _current_os | trim == "flatcar"
+
+- name: "[Flatcar] Refresh server info after shutdown"
+  ops_frontier.provider.sakura_server_info:
+    name: "{{ inventory_hostname }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  register: _server_info_pre_swap
+  delegate_to: localhost
+  when: _current_os | trim == "flatcar"
+
+- name: "[Flatcar] Swap disks (Ubuntu first)"
+  ops_frontier.provider.sakura_disk_swap:
+    server_id: "{{ _server_info_pre_swap.server.id }}"
+    disks: "{{ _server_info_pre_swap.server.disks }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  when: _current_os | trim == "flatcar"
+
+- name: "[Flatcar] Power on with Ubuntu disk"
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _server_info_pre_swap.server.id }}"
+    state: on
+    timeout: 120
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+  when: _current_os | trim == "flatcar"
+
+- name: "[Flatcar] Wait for Ubuntu SSH"
+  ansible.builtin.command:
+    cmd: >
+      ssh -i {{ ssh_key_path }}
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      -o ConnectTimeout=10 -o BatchMode=yes
+      {{ ubuntu_ssh_user }}@{{ ansible_host }} true
+  delegate_to: localhost
+  register: _ubuntu_ssh_wait
+  until: _ubuntu_ssh_wait.rc == 0
+  retries: 30
+  delay: 10
+  when: _current_os | trim == "flatcar"
+
+# ---------------------------------------------------------------
+# 3.5. Ubuntu SSH ホスト鍵を取得 (Flatcar に引き継ぐ)
+#      Ubuntu / Flatcar で同一ホスト鍵を使うことで known_hosts の
+#      再登録が不要になる。
+# ---------------------------------------------------------------
+- name: Fetch Ubuntu SSH host keys for Flatcar propagation
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  register: _ubuntu_ssh_host_keys
+  loop:
+    - /etc/ssh/ssh_host_rsa_key
+    - /etc/ssh/ssh_host_rsa_key.pub
+    - /etc/ssh/ssh_host_ecdsa_key
+    - /etc/ssh/ssh_host_ecdsa_key.pub
+    - /etc/ssh/ssh_host_ed25519_key
+    - /etc/ssh/ssh_host_ed25519_key.pub
+  become: true
+  vars:
+    ansible_user: "{{ ubuntu_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      -o ConnectTimeout=10
+      -o BatchMode=yes
+
+# ---------------------------------------------------------------
+# 4. Butane テンプレートから Ignition JSON を生成
+# ---------------------------------------------------------------
+- name: Set per-node template variables
+  ansible.builtin.set_fact:
+    hostname: "{{ inventory_hostname }}"
+    cluster_token: "{{ tf_outputs.k3s_cluster_token.value }}"
+    server_is_init: "{{ node_index == 0 }}"
+    init_ip: "{{ tf_outputs.node_private_ips.value[tf_outputs.node_private_ips.value.keys() | sort | first] }}"
+    internal_ip: "{{ tf_outputs.node_private_ips.value[inventory_hostname] }}"
+    lb_ip: "{{ tf_outputs.node_public_ips.value[inventory_hostname] }}"
+    lb_netmask: "{{ tf_outputs.lb_netmask.value }}"
+    lb_gateway: "{{ tf_outputs.lb_gateway.value }}"
+    lb_vip_ip: "{{ tf_outputs.lb_global_ip.value }}"
+    ssh_public_key: "{{ tf_outputs.ssh_public_key_openssh.value | trim }}"
+    domain: "{{ tf_outputs.domain.value }}"
+    auto_shutdown_at_utc: "{{ tf_outputs.auto_shutdown_at_utc.value | default('') }}"
+    ssh_host_rsa_key_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_rsa_key') | first).content }}"
+    ssh_host_rsa_pub_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_rsa_key.pub') | first).content }}"
+    ssh_host_ecdsa_key_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_ecdsa_key') | first).content }}"
+    ssh_host_ecdsa_pub_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_ecdsa_key.pub') | first).content }}"
+    ssh_host_ed25519_key_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_ed25519_key') | first).content }}"
+    ssh_host_ed25519_pub_b64: "{{ (_ubuntu_ssh_host_keys.results | selectattr('item', 'equalto', '/etc/ssh/ssh_host_ed25519_key.pub') | first).content }}"
+  delegate_to: localhost
+
+- name: Render Butane YAML from Jinja2 template
+  ansible.builtin.template:
+    src: "{{ workspace_dir }}/butane/node.yaml.j2"
+    dest: "/tmp/butane-{{ inventory_hostname }}.yaml"
+    mode: "0600"
+  delegate_to: localhost
+
+- name: Generate Ignition JSON via butane
+  ansible.builtin.command:
+    cmd: butane --pretty --strict /tmp/butane-{{ inventory_hostname }}.yaml
+  register: _ignition_json
+  delegate_to: localhost
+  changed_when: false
+
+- name: Write Ignition JSON to temp file
+  ansible.builtin.copy:
+    content: "{{ _ignition_json.stdout }}"
+    dest: "/tmp/ignition-{{ inventory_hostname }}.ign"
+    mode: "0600"
+  delegate_to: localhost
+
+# ---------------------------------------------------------------
+# 5. flatcar-install を実行
+# ---------------------------------------------------------------
+- name: Copy Ignition file to Ubuntu server
+  ansible.builtin.command:
+    cmd: >
+      scp -i {{ ssh_key_path }}
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      /tmp/ignition-{{ inventory_hostname }}.ign
+      {{ ubuntu_ssh_user }}@{{ ansible_host }}:/tmp/node.ign
+  delegate_to: localhost
+  changed_when: true
+
+- name: Run flatcar-install on Ubuntu (may take several minutes)
+  ansible.builtin.shell:
+    cmd: |
+      exec </dev/null
+      echo nameserver 8.8.8.8 | sudo tee /etc/resolv.conf > /dev/null
+      sudo sed -i 's/udevadm settle/udevadm settle --timeout=30/g' \
+        /usr/local/bin/flatcar-install
+      sudo flatcar-install -d /dev/vdb -i /tmp/node.ign
+  vars:
+    ansible_user: "{{ ubuntu_ssh_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_common_args: >-
+      -T
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile={{ known_hosts_path }}
+      -o ServerAliveInterval=30
+      -o ServerAliveCountMax=10
+      -o BatchMode=yes
+  changed_when: true
+  async: 1800
+  poll: 15
+
+# ---------------------------------------------------------------
+# 6. シャットダウン → ディスク順序入替え (Flatcar 先頭) → 起動
+# ---------------------------------------------------------------
+- name: Power off after Flatcar install
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _server_info.server.id }}"
+    state: off
+    timeout: 180
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+
+- name: Refresh server info after install
+  ops_frontier.provider.sakura_server_info:
+    name: "{{ inventory_hostname }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  register: _server_info
+  delegate_to: localhost
+
+- name: Swap disks (Flatcar first)
+  ops_frontier.provider.sakura_disk_swap:
+    server_id: "{{ _server_info.server.id }}"
+    disks: "{{ _server_info.server.disks }}"
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+
+- name: Power on with Flatcar disk
+  ops_frontier.provider.sakura_server_power:
+    server_id: "{{ _server_info.server.id }}"
+    state: on
+    timeout: 150
+    api_base: "{{ sakura_api_base }}"
+    token: "{{ sakura_access_token }}"
+    secret: "{{ sakura_access_token_secret }}"
+  delegate_to: localhost
+
+# ---------------------------------------------------------------
+# 7. Flatcar 起動確認
+# ---------------------------------------------------------------
+- name: Scan Flatcar SSH host key
+  ansible.builtin.command:
+    cmd: "ssh-keyscan -T 10 {{ ansible_host }}"
+  register: _keyscan_flatcar
+  delegate_to: localhost
+  until: >-
+    _keyscan_flatcar.rc == 0 and
+    _keyscan_flatcar.stdout | trim != ""
+  retries: 60
+  delay: 10
+
+- name: Register Flatcar host key
+  ansible.builtin.shell:
+    cmd: |
+      ssh-keygen -R {{ ansible_host }} -f {{ known_hosts_path }} 2>/dev/null || true
+      echo "{{ _keyscan_flatcar.stdout }}" >> {{ known_hosts_path }}
+      chmod 600 {{ known_hosts_path }}
+  delegate_to: localhost
+  changed_when: true
+
+- name: Verify Flatcar SSH connection
+  ansible.builtin.raw: cat /etc/os-release
+  register: _verify_flatcar
+  until: _verify_flatcar.rc == 0 and 'ID=flatcar' in _verify_flatcar.stdout
+  retries: 30
+  delay: 10
+  vars:
+    ansible_user: "{{ flatcar_ssh_user }}"
+
+- name: Show completion
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: Flatcar Container Linux 起動確認 ✓"
+
+- name: Cleanup temp files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/butane-{{ inventory_hostname }}.yaml"
+    - "/tmp/ignition-{{ inventory_hostname }}.ign"
+  delegate_to: localhost

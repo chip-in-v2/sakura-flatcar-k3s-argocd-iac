@@ -1,0 +1,52 @@
+---
+# wait_for_argocd role – ArgoCD が Ready になるまで待機する
+
+- name: Wait for argocd namespace
+  ansible.builtin.shell:
+    cmd: kubectl get namespace argocd
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _argocd_ns
+  until: _argocd_ns.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Wait for ArgoCD CRD
+  ansible.builtin.shell:
+    cmd: kubectl get crd applications.argoproj.io
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _argocd_crd
+  until: _argocd_crd.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Wait for argocd-server deployment to exist
+  ansible.builtin.shell:
+    cmd: kubectl get deployment argocd-server -n argocd
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _argocd_dep
+  until: _argocd_dep.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Wait for argocd-server to be available
+  ansible.builtin.shell:
+    cmd: >
+      kubectl wait --for=condition=available deployment/argocd-server
+      -n argocd --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: false
+
+- name: ArgoCD is ready
+  ansible.builtin.debug:
+    msg: "ArgoCD Ready ✓"

@@ -1,0 +1,41 @@
+---
+# push-infra-apps.yml – infra-apps チャートを再 push して ArgoCD に同期させる
+- name: Prepare facts and SSH
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+    - get_my_ip
+    - packet_filter_ssh_allow
+
+  tasks:
+    - name: Add sv1 host dynamically
+      ansible.builtin.add_host:
+        name: "{{ sv1_name }}"
+        ansible_host: "{{ tf_outputs.node_public_ips.value[sv1_name] }}"
+        groups: _sv1
+        tf_outputs: "{{ tf_outputs }}"
+      vars:
+        sv1_name: "{{ tf_outputs.node_public_ips.value.keys() | sort | first }}"
+
+- name: Push infra-apps chart to OCI and update app-of-apps
+  hosts: _sv1
+  gather_facts: false
+  tasks:
+    - name: Update known_hosts
+      ansible.builtin.include_role:
+        name: update_known_hosts
+
+    - name: Verify argocd namespace exists
+      ansible.builtin.shell:
+        cmd: kubectl get namespace argocd
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        PATH: "{{ ansible_env.PATH }}:/opt/bin"
+      changed_when: false
+      register: _ns_check
+      failed_when: _ns_check.rc != 0
+
+    - name: Push infra-apps
+      ansible.builtin.include_role:
+        name: push_infra_apps

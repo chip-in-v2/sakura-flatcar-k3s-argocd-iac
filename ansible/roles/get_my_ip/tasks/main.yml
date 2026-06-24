@@ -1,0 +1,25 @@
+---
+# get_my_ip role – 実行環境のグローバル IP を取得して my_ip ファクトに設定する
+
+- name: Get global IP address
+  ansible.builtin.uri:
+    url: https://checkip.amazonaws.com
+    return_content: true
+  register: _ip_resp
+  delegate_to: localhost
+  run_once: true
+
+- name: Set my_ip fact
+  ansible.builtin.set_fact:
+    my_ip: "{{ _ip_resp.content | trim }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Distribute my_ip to all hosts
+  ansible.builtin.set_fact:
+    my_ip: "{{ hostvars['localhost']['my_ip'] }}"
+
+- name: Show global IP
+  ansible.builtin.debug:
+    msg: "グローバル IP: {{ my_ip }}"
+  run_once: true

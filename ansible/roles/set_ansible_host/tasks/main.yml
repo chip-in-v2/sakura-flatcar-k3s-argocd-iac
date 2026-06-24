@@ -1,0 +1,8 @@
+---
+# set_ansible_host role – tf_outputs から ansible_host を動的に設定する
+# 各 playbook の pre_tasks または最初のロールとして呼ぶ
+
+- name: Set ansible_host from terraform outputs
+  ansible.builtin.set_fact:
+    ansible_host: "{{ tf_outputs.node_public_ips.value[inventory_hostname] }}"
+  when: inventory_hostname in tf_outputs.node_public_ips.value

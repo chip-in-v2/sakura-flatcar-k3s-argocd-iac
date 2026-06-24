@@ -1,0 +1,179 @@
+---
+# argocd_bootstrap role – ArgoCD の初期設定マニフェストを apply する
+# push_infra_apps role の後に実行すること
+
+- name: Apply ArgoCD bootstrap manifest
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/bootstrap.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _bootstrap_result
+  until: _bootstrap_result.rc == 0
+  retries: 5
+  delay: 15
+
+- name: Apply ArgoCD config (SSO + RBAC)
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/argocd-config.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _config_result
+  until: _config_result.rc == 0
+  retries: 5
+  delay: 15
+
+- name: Rollout restart argocd-server
+  ansible.builtin.shell:
+    cmd: >
+      kubectl rollout restart deployment/argocd-server -n argocd
+      && kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+
+- name: Wait for app-of-apps to sync
+  ansible.builtin.shell:
+    cmd: |
+      DEADLINE=$(( $(date +%s) + 300 ))
+      while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        SYNC=$(kubectl get application app-of-apps -n argocd \
+          -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+        HEALTH=$(kubectl get application app-of-apps -n argocd \
+          -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+        echo "app-of-apps: sync=${SYNC} health=${HEALTH}"
+        [ "$SYNC" = "Synced" ] && exit 0
+        sleep 10
+      done
+      echo "Timeout waiting for app-of-apps to sync" >&2
+      exit 1
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: false
+
+- name: Wait for cert-manager namespace
+  ansible.builtin.shell:
+    cmd: kubectl get namespace cert-manager
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _cm_ns
+  until: _cm_ns.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Wait for cert-manager to be available
+  ansible.builtin.shell:
+    cmd: >
+      kubectl wait --for=condition=available deployment/cert-manager
+      -n cert-manager --timeout=300s
+      && kubectl wait --for=condition=available deployment/cert-manager-webhook
+      -n cert-manager --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: false
+
+- name: Apply cert-manager issuers
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/cert-manager-issuers.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _cm_result
+  until: _cm_result.rc == 0
+  retries: 5
+  delay: 15
+
+- name: Apply grafana OAuth secret
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/grafana-oauth-secret.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _grafana_result
+  until: _grafana_result.rc == 0
+  retries: 5
+  delay: 15
+
+- name: Apply cilium assigned IPs
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/cilium-assigned-ips.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _cilium_result
+  until: _cilium_result.rc == 0
+  retries: 5
+  delay: 15
+  # namespace がまだ存在しない場合は無視
+  failed_when: >-
+    _cilium_result.rc != 0 and
+    'not found' not in _cilium_result.stderr | default('')
+
+- name: Wait for Traefik CRD
+  ansible.builtin.shell:
+    cmd: kubectl get crd tlsstores.traefik.io
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _traefik_crd
+  until: _traefik_crd.rc == 0
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Wait for Traefik to be available
+  ansible.builtin.shell:
+    cmd: >
+      kubectl wait --for=condition=available deployment/traefik
+      -n traefik --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: false
+
+- name: Wait for wildcard-tls certificate to be Ready (DNS-01 チャレンジ完了待ち)
+  ansible.builtin.shell:
+    cmd: >
+      kubectl get certificate wildcard-tls -n traefik
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  register: _wildcard_cert
+  until: _wildcard_cert.rc == 0 and _wildcard_cert.stdout | trim == "True"
+  retries: 60
+  delay: 10
+  changed_when: false
+
+- name: Apply ArgoCD ingress
+  ansible.builtin.shell:
+    cmd: kubectl apply -f -
+    stdin: "{{ lookup('file', rendered_dir + '/argocd-ingress.yaml') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
+  changed_when: true
+  register: _ingress_result
+  until: _ingress_result.rc == 0
+  retries: 5
+  delay: 15
+
+- name: Bootstrap complete
+  ansible.builtin.debug:
+    msg: "ArgoCD ブートストラップ完了 ✓"

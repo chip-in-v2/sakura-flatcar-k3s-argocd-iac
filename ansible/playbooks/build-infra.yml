@@ -1,0 +1,88 @@
+---
+# build-infra.yml – terraform apply → SSH 許可 → flatcar-install インストール
+- name: Gather Terraform outputs and global IP
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Apply Terraform
+      community.general.terraform:
+        project_path: "{{ terraform_dir }}"
+        state: present
+        force_init: true
+      register: _tf
+
+    - name: Get Terraform outputs
+      ansible.builtin.command:
+        cmd: terraform output -json
+        chdir: "{{ terraform_dir }}"
+      register: _tf_raw
+      changed_when: false
+
+    - name: Parse Terraform outputs
+      ansible.builtin.set_fact:
+        tf_outputs: "{{ _tf_raw.stdout | from_json }}"
+
+    - name: Get global IP
+      ansible.builtin.uri:
+        url: https://checkip.amazonaws.com
+        return_content: true
+      register: _ip_resp
+
+    - name: Set my_ip
+      ansible.builtin.set_fact:
+        my_ip: "{{ _ip_resp.content | trim }}"
+
+    - name: Add SSH allow rules to packet filter
+      ops_frontier.provider.sakura_packet_filter:
+        packet_filter_id: "{{ tf_outputs.packet_filter_id.value }}"
+        state: present
+        rule_type: ssh
+        source_network: "{{ my_ip }}"
+        api_base: "{{ sakura_api_base }}"
+        token: "{{ sakura_access_token }}"
+        secret: "{{ sakura_access_token_secret }}"
+
+    - name: Add server hosts dynamically
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        ansible_host: "{{ item.value }}"
+        groups: servers
+        tf_outputs: "{{ tf_outputs }}"
+        my_ip: "{{ my_ip }}"
+      loop: "{{ tf_outputs.node_public_ips.value | dict2items }}"
+
+    - name: Update ~/.ssh/config
+      ansible.builtin.include_role:
+        name: setup_ssh_config
+
+- name: Wait for Ubuntu SSH and install flatcar-install
+  hosts: servers
+  gather_facts: false
+  strategy: free
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Remove old known_hosts entry for this host
+      ansible.builtin.known_hosts:
+        name: "{{ ansible_host }}"
+        state: absent
+        path: "{{ known_hosts_path }}"
+      delegate_to: localhost
+
+    - name: Wait for Ubuntu SSH
+      ansible.builtin.command:
+        cmd: >
+          ssh -i {{ ssh_key_path }}
+          -o StrictHostKeyChecking=accept-new
+          -o UserKnownHostsFile={{ known_hosts_path }}
+          -o ConnectTimeout=10 -o BatchMode=yes
+          {{ ubuntu_ssh_user }}@{{ ansible_host }} true
+      delegate_to: localhost
+      register: _ssh_wait
+      until: _ssh_wait.rc == 0
+      retries: 30
+      delay: 10
+
+    - name: Install flatcar-install on Ubuntu
+      ansible.builtin.include_role:
+        name: install_flatcar_deps

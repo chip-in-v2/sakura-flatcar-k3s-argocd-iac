@@ -1,0 +1,8 @@
+---
+# deny-ssh.yml – パケットフィルタから SSH ルールを削除する
+- name: Deny SSH access
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - terraform_outputs
+    - packet_filter_ssh_deny

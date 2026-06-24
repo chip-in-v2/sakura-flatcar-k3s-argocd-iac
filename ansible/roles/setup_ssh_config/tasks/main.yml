@@ -1,0 +1,58 @@
+---
+# setup_ssh_config role – ~/.ssh/config にサーバの接続設定を書き込む
+
+- name: Ensure ~/.ssh directory exists
+  ansible.builtin.file:
+    path: "~/.ssh"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+
+- name: Read current ~/.ssh/config
+  ansible.builtin.slurp:
+    src: "~/.ssh/config"
+  register: _current_config
+  delegate_to: localhost
+  run_once: true
+  failed_when: false
+
+- name: Build managed section
+  ansible.builtin.set_fact:
+    _ssh_managed_block: |
+      # BEGIN sakura-flatcar-k3s managed section
+      {% for name in tf_outputs.node_public_ips.value | dict2items | sort(attribute='key') %}
+
+      Host {{ name.key }}
+          HostName {{ name.value }}
+          User {{ flatcar_ssh_user }}
+          IdentityFile {{ ssh_key_path }}
+          StrictHostKeyChecking yes
+          UserKnownHostsFile {{ known_hosts_path }}
+      {% endfor %}
+      # END sakura-flatcar-k3s managed section
+  delegate_to: localhost
+  run_once: true
+
+- name: Write ~/.ssh/config (managed block)
+  ansible.builtin.blockinfile:
+    path: "~/.ssh/config"
+    block: |
+      {% for name in tf_outputs.node_public_ips.value | dict2items | sort(attribute='key') %}
+      Host {{ name.key }}
+          HostName {{ name.value }}
+          User {{ flatcar_ssh_user }}
+          IdentityFile {{ ssh_key_path }}
+          StrictHostKeyChecking yes
+          UserKnownHostsFile {{ known_hosts_path }}
+      {% endfor %}
+    marker: "# {mark} sakura-flatcar-k3s managed section"
+    create: true
+    mode: "0600"
+  delegate_to: localhost
+  run_once: true
+
+- name: Show completion
+  ansible.builtin.debug:
+    msg: "~/.ssh/config を更新しました"
+  run_once: true
