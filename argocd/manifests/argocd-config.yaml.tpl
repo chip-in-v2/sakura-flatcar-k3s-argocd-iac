@@ -21,6 +21,16 @@ data:
           orgs:
             - name: ${gh_organization}
   url: "https://argocd.${domain}"
+  resource.exclusions: |
+    - apiGroups:
+      - cert-manager.io
+      - acme.cert-manager.io
+      kinds:
+      - CertificateRequest
+      - Order
+      - Challenge
+      clusters:
+      - "*"
 ---
 apiVersion: v1
 kind: Secret
@@ -41,9 +51,13 @@ metadata:
   namespace: argocd
 data:
   policy.csv: |
+    p, role:developer, applications, get, */*, allow
+    p, role:developer, applications, sync, */*, allow
+    p, role:developer, applications, action/*, */*, allow
+    p, role:developer, logs, get, */*, allow
     g, ${gh_organization}:admin, role:admin
-    g, ${gh_organization}:developer, role:readonly
-  policy.default: role:''
+    g, ${gh_organization}:developer, role:developer
+  policy.default: role:developer
 ---
 apiVersion: v1
 kind: ConfigMap

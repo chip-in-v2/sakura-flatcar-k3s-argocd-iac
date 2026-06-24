@@ -199,7 +199,7 @@ systemd:
         Description=Install and start k3s
         After=network-online.target
         Wants=network-online.target
-        ConditionPathExists=!/opt/bin/k3s
+        ConditionFirstBoot=yes
 
         [Service]
         Type=oneshot
@@ -220,6 +220,7 @@ systemd:
         Description=Install ArgoCD and supporting components
         After=install-k3s.service
         Requires=install-k3s.service
+        ConditionFirstBoot=yes
 
         [Service]
         Type=oneshot

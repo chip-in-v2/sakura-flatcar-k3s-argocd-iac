@@ -73,10 +73,6 @@ ${node_lb_ips_yaml}
         additionalArguments:
           - "--serversTransport.insecureSkipVerify=true"
           - "--entryPoints.websecure.http.tls=true"
-          - "--entryPoints.websecure.http.tls.options=default"
-        tlsOptions:
-          default:
-            sniStrict: false
         logs:
           general:
             format: json
@@ -121,6 +117,14 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jqPathExpressions:
+        - .spec.conversion.webhook.clientConfig.caBundle
+        - .spec.versions[].selectableFields
+        - .status
 ---
 # ---------------------------------------------------------------
 # Tetragon (eBPF セキュリティ監視)
@@ -173,17 +177,14 @@ spec:
     helm:
       values: |
         role: Agent
+        service:
+          enabled: false
         customConfig:
           data_dir: /vector-data-dir
           sources:
             kubernetes_logs:
               type: kubernetes_logs
               auto_partial_merge: true
-            k3s_journal:
-              type: journald
-              units:
-                - k3s
-                - containerd
             tetragon_logs:
               type: file
               include:
@@ -195,13 +196,12 @@ spec:
               type: remap
               inputs:
                 - kubernetes_logs
-                - k3s_journal
                 - tetragon_logs
               source: |
                 if is_string(.message) {
                   parsed, err = parse_json(.message)
-                  if err == null {
-                    . = merge(., parsed)
+                  if err == null && is_object(parsed) {
+                    . = merge!(., parsed)
                   }
                 }
 
