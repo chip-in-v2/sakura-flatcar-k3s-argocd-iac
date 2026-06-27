@@ -74,13 +74,17 @@
   ansible.builtin.shell:
     cmd: >
       kubectl wait --for=condition=available deployment/cert-manager
-      -n cert-manager --timeout=300s
+      -n cert-manager --timeout=60s
       && kubectl wait --for=condition=available deployment/cert-manager-webhook
-      -n cert-manager --timeout=300s
+      -n cert-manager --timeout=60s
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
     PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
   changed_when: false
+  register: _cm_wait_result
+  until: _cm_wait_result.rc == 0
+  retries: 10
+  delay: 30
 
 - name: Apply cert-manager issuers
   ansible.builtin.shell:

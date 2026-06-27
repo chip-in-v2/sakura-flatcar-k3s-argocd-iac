@@ -23,10 +23,9 @@ spec:
           replicas: 1
         ipam:
           mode: kubernetes
-        # 割り当てIP (127.0.99.x) への接続をソケットレベルでインターセプトするため socketLB を有効化
+        # socketLB: BPF ソケットレベル LB (kube-proxy replacement の一般機能)
         socketLB:
           enabled: true
-        localRedirectPolicy: true
         hubble:
           relay:
             enabled: true
@@ -213,7 +212,7 @@ spec:
               type: greptimedb_logs
               inputs:
                 - parse_json_logs
-              endpoint: "http://127.0.99.1:4000"
+              endpoint: "http://10.43.1.1:4000"
               table: k3s_logs
               dbname: public
   destination:
@@ -237,12 +236,12 @@ metadata:
 spec:
   project: infra
   source:
-    repoURL: https://greptimeteam.github.io/greptimedb-operator
-    chart: greptimedb-operator
+    repoURL: https://greptimeteam.github.io/helm-charts
+    chart: greptimedb-standalone
     targetRevision: "0.*"
     helm:
       values: |
-        replicas: 1
+        dataHome: /data/greptimedb
   destination:
     server: https://kubernetes.default.svc
     namespace: greptimedb
@@ -298,9 +297,67 @@ spec:
             datasources:
               - name: GreptimeDB
                 type: mysql
-                url: "127.0.99.1:4002"
+                url: "10.43.1.1:4002"
                 database: public
                 isDefault: true
+        dashboardProviders:
+          dashboardproviders.yaml:
+            apiVersion: 1
+            providers:
+              - name: default
+                orgId: 1
+                folder: ''
+                type: file
+                disableDeletion: false
+                editable: true
+                options:
+                  path: /var/lib/grafana/dashboards/default
+        dashboards:
+          default:
+            k3s-logs:
+              json: |-
+                {
+                  "id": null,
+                  "uid": "k3s-logs",
+                  "title": "k3s Logs",
+                  "schemaVersion": 38,
+                  "version": 1,
+                  "refresh": "30s",
+                  "time": { "from": "now-1h", "to": "now" },
+                  "panels": [
+                    {
+                      "id": 1,
+                      "type": "timeseries",
+                      "title": "Log Volume by Namespace",
+                      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+                      "datasource": "GreptimeDB",
+                      "targets": [
+                        {
+                          "rawSql": "SELECT date_trunc('minute', greptime_timestamp) AS time, `kubernetes.pod_namespace` AS metric, COUNT(*) AS value FROM k3s_logs WHERE $__timeFilter(greptime_timestamp) GROUP BY 1, 2 ORDER BY 1 ASC",
+                          "format": "time_series",
+                          "refId": "A"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 2,
+                      "type": "table",
+                      "title": "Recent Logs",
+                      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 8 },
+                      "datasource": "GreptimeDB",
+                      "targets": [
+                        {
+                          "rawSql": "SELECT greptime_timestamp AS time, `kubernetes.pod_namespace` AS namespace, `kubernetes.pod_name` AS pod, `kubernetes.container_name` AS container, stream, message FROM k3s_logs WHERE $__timeFilter(greptime_timestamp) ORDER BY greptime_timestamp DESC LIMIT 500",
+                          "format": "table",
+                          "refId": "A"
+                        }
+                      ],
+                      "options": {
+                        "sortBy": [{ "displayName": "time", "desc": true }]
+                      }
+                    }
+                  ]
+                }
   destination:
     server: https://kubernetes.default.svc
     namespace: observability

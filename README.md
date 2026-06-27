@@ -17,7 +17,7 @@
 
 ## 構築ツール
 
-IaC のツールとしては、Terraform と Ignition(Butane) を使用する。Codespace でこのリポジトリを開き、`setup.py` で構築する。
+IaC のツールとしては、Terraform と Ignition(Butane) を使用する。プロビジョニングの自動化には Ansible を使用する。Codespace でこのリポジトリを開き、各 playbook の alias コマンドで構築する。
 
 
 ### 事前準備
@@ -63,7 +63,7 @@ terraform でサーバを3台を SAKURA_REGION で指定されたリージョン
 
 ### ssh
 
-ssh のペア鍵は terraform でオンデマンドに生成する。`setup.py build-infra` が以下を自動的に行う。
+ssh のペア鍵は terraform でオンデマンドに生成する。`build-infra` が以下を自動的に行う。
 
 1. 開発環境からインターネットに接続するときのグローバルIPを調べる
 2. パケットフィルタで 22 番ポートの tcp 接続を開発環境の IP のみ許可する
@@ -73,7 +73,7 @@ config では `${SAKURA_LABEL_PREFIX}-sv1`, `${SAKURA_LABEL_PREFIX}-sv2`, `${SAK
 
 ### 初期インストール
 
-初期インストールは Flatcar Container Linux でデフォルトでサポートされている Ignition を使用する。Ignition の内容については Butane を使用して [YAML](./butane/node.yaml.tpl) で記述する。`setup.py boot` がテンプレートから各サーバ用の Ignition ファイルを生成し、Ubuntu 上で `flatcar-install` を実行してターゲットディスクにインストールする。インストール完了後、ディスク順序を入れ替えて Flatcar から起動する。
+初期インストールは Flatcar Container Linux でデフォルトでサポートされている Ignition を使用する。Ignition の内容については Butane を使用して [YAML](./butane/node.yaml.j2) で記述する。`boot` がテンプレートから各サーバ用の Ignition ファイルを生成し、Ubuntu 上で `flatcar-install` を実行してターゲットディスクにインストールする。インストール完了後、ディスク順序を入れ替えて Flatcar から起動する。
 
 ### ミドルウェア
 
@@ -181,7 +181,8 @@ Tetragonのログを稼働監視で収集できるように Chart の ConfigMap 
    - (その他、Readme上部の「パラメータ」表にある値を必要に応じて設定)
 
 2. リポジトリの画面に戻り、`Code` > `Codespaces` から新しい Codespace を起動します。
-   - `.devcontainer/devcontainer.json` に基づいて自動的に Terraform や k3s がインストールされた環境が立ち上がります。
+   - `.devcontainer/devcontainer.json` に基づいて自動的に Terraform、Ansible、k3s がインストールされた環境が立ち上がります。
+   - `post-create.sh` により各 Ansible playbook の alias が `~/.bashrc` に設定され、playbook 名（拡張子なし）のコマンドが使えるようになります。
    - 上記で設定した環境変数は、すべて `TF_VAR_` プレフィックスが付与されて Terraform 用の変数として自動認識されます。
 
 ### 3. Terraform 初期化
@@ -194,7 +195,7 @@ cd terraform && terraform init && cd ..
 Ubuntu サーバのプロビジョニング、SSH パケットフィルタの設定、`flatcar-install` のインストールを行う。
 
 ```bash
-./setup.py build-infra
+build-infra
 ```
 
 ### 5. Flatcar Linux のインストールと起動
@@ -202,7 +203,7 @@ Ubuntu サーバのプロビジョニング、SSH パケットフィルタの設
 各サーバに Ignition ファイルを生成して Flatcar をインストールし、再起動する。k3s と ArgoCD は起動後に自動インストールされる。
 
 ```bash
-./setup.py boot
+boot
 ```
 
 ### 6. クラスタの確認
@@ -223,16 +224,16 @@ kubectl get pods -n argocd
 kubectl get nodes
 ```
 
-### 7. ArgoCD ブートストラップ (install-charts)
+### 7. ArgoCD ブートストラップ (install-infra-apps)
 
 YAML テンプレートをレンダリングし、`~/.kube/config` を設定した上で ArgoCD に App of Apps と各種マニフェストを適用する。このコマンドは Codespace から実行する。
 
 ```bash
-./setup.py install-charts
+install-infra-apps
 ```
 
 実行内容:
-1. `argocd/manifests/*.yaml.tpl` および `argocd/apps/infra-apps.yaml.tpl` を `rendered/` にレンダリング
+1. `argocd/manifests/*.yaml.j2` および `argocd/apps/infra-apps.yaml.j2` を Jinja2 でレンダリングし `rendered/` に出力
 2. sv1 から kubeconfig を取得して `~/.kube/config` に保存 (context: `sakura-k3s`)
 3. 以下のマニフェストを `kubectl apply`:
    - `rendered/bootstrap.yaml` — ArgoCD AppProject + App of Apps
@@ -255,12 +256,19 @@ kubectl get pods -n traefik
 作業完了後、SSH のパケットフィルタルールを削除してセキュリティを強化する。
 
 ```bash
-./setup.py deny-ssh
+deny-ssh
+```
+
+### サーバの起動・停止
+
+```bash
+startup-servers   # 全サーバを起動
+shutdown-servers  # 全サーバをシャットダウン
 ```
 
 ### インフラの削除
 
 ```bash
-./setup.py destroy
+destroy
 ```
 

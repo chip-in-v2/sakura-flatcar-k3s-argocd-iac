@@ -31,7 +31,7 @@
         cmd: kubectl get namespace argocd
       environment:
         KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-        PATH: "{{ ansible_env.PATH }}:/opt/bin"
+        PATH: /usr/local/bin:/opt/bin:/usr/bin:/bin
       changed_when: false
       register: _ns_check
       failed_when: _ns_check.rc != 0
